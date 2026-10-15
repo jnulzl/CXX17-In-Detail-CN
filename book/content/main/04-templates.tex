@@ -1,0 +1,703 @@
+你平时会用到模板和/或元编程吗？
+
+如果你的答案是“是”，那么 C++17 带来的更新想必会让你非常高兴。新标准引入了诸多增强特性，让模板编程变得简单得多，也更具表现力。
+
+本章你将学到：
+
+\begin{itemize}
+\item 类模板实参推导（Template Argument Deduction for Class Templates）
+\item \texttt{template<auto>}
+\item 折叠表达式（Fold Expressions）
+\item if constexpr —— C++ 的编译期 if！
+\item 以及一些更小、更细节的改进与修正
+\end{itemize}
+
+\section{类模板实参推导}
+
+你是否经常使用 \texttt{make\_Type} 这类函数来构造模板化对象（例如 \texttt{std::make\_pair}）？在 C++17 中，你可以把（大部分）这类函数抛到脑后，直接使用普通的构造函数即可。C++17 填补了模板推导规则中的一处空白：现在模板推导不仅能作用于函数，也能作用于标准类模板。这也意味着你的一大堆代码——那些 \texttt{make\_Type} 函数——现在都可以删掉了。
+
+例如，要创建一个 pair，通常这样写会更方便：
+
+\begin{codebox}[cpp]
+auto myPair = std::make_pair(42, "hello world");
+\end{codebox}
+
+而不是：
+
+\begin{codebox}[cpp]
+std::pair<int, std::string> myPair(42, "hello world");
+\end{codebox}
+
+因为 \texttt{std::make\_pair} 是一个模板函数，编译器可以对函数模板实参进行推导，所以没必要写成：
+
+\begin{codebox}[cpp]
+auto myPair = std::make_pair<int, std::string>(42, "hello world");
+\end{codebox}
+
+如今，自 C++17 起，符合标准的编译器也能为类模板漂亮地推导出模板参数类型了！
+
+在我们的例子中，现在可以这样写：
+
+\begin{codebox}[cpp]
+using namespace std::string_literals;
+std::pair myPair(42, "hello world"s); // deduced automatically!
+\end{codebox}
+
+这能大幅简化诸如下面这样复杂的构造：
+
+\begin{codebox}[cpp]
+// lock guard:
+std::shared_timed_mutex mut;
+std::lock_guard<std::shared_timed_mutex> lck(mut);
+// array:
+std::array<int, 3> arr {1, 2, 3};
+\end{codebox}
+
+现在可以写成：
+
+\begin{codebox}[cpp]
+std::shared_timed_mutex mut;
+std::lock_guard lck(mut);
+std::array arr { 1, 2, 3 };
+\end{codebox}
+
+请注意，部分推导是不可能发生的，你必须要么提供全部模板参数，要么一个都不提供：
+
+\begin{codebox}[cpp]
+std::tuple t(1, 2, 3);
+// OK: deduction
+std::tuple<int,int,int> t(1, 2, 3); // OK: all arguments are provided
+std::tuple<int> t(1, 2, 3);
+// Error: partial deduction
+\end{codebox}
+
+借助这个特性，许多 \texttt{make\_Type} 函数可能都不再需要了——尤其是那些为类“模拟”模板推导的函数。
+
+不过，仍有一些工厂函数会做额外的工作。例如 \texttt{std::make\_shared}——它不仅创建 \texttt{shared\_ptr}，还会确保控制块与被指向的对象分配在同一块内存区域中：
+
+\begin{codebox}[cpp]
+// control block and int might be in different places in memory
+std::shared_ptr<int> p(new int{10});
+// the control block and int are in the same contiguous memory section
+auto p2 = std::make_shared<int>(10);
+\end{codebox}
+
+类模板实参推导是如何工作的呢？
+
+让我们进入“推导指引”这一领域。
+
+\subsection{推导指引}
+
+编译器使用一组称为“推导指引（Deduction Guides）”的特殊规则来推导模板类类型。我们有两类规则：编译器生成（隐式生成）的，以及用户自定义的。
+
+为了理解编译器如何使用这些指引，我们来看一个例子。下面是 \texttt{std::array} 的一个自定义推导指引：
+
+\begin{codebox}[cpp]
+template <class T, class... U>
+array(T, U...) -> array<T, 1 + sizeof...(U)>;
+\end{codebox}
+
+它的语法看起来像一个带有尾置返回类型的模板函数。编译器会把这样一个“假想”的函数当作参数的候选。如果模式匹配成功，就会从推导中返回正确的类型。
+
+在我们的例子中，当你写下：
+
+\begin{codebox}[cpp]
+std::array arr {1, 2, 3, 4};
+\end{codebox}
+
+那么，假设 \texttt{T} 和 \texttt{U...} 是同一类型，我们就能构建出一个 \texttt{std::array<int, 4>} 对象。
+
+在大多数情况下，你可以依赖编译器生成自动推导指引。它们会为主类模板的每个构造函数（包括拷贝/移动构造函数）创建。请注意，被特化或部分特化的类在这里是行不通的。
+
+如前所述，你也可以编写自己的推导指引：
+
+一个常见的自定义推导指引的例子，是把 \texttt{std::string} 而不是 \texttt{const char*} 推导出来：
+
+\begin{codebox}[cpp]
+template<typename T>
+struct MyType
+{
+T str;
+};
+// custom deduction guide
+MyType(const char *) -> MyType<std::string>;
+MyType t{"Hello World"};
+\end{codebox}
+
+如果没有这个自定义推导，\texttt{T} 会被推导为 \texttt{const char*}。
+
+另一个自定义推导指引的例子是重载：
+
+\begin{codebox}[cpp]
+template<class... Ts>
+struct overload : Ts... { using Ts::operator()...; };
+template<class... Ts>
+overload(Ts...) -> overload<Ts...>; // deduction guide
+\end{codebox}
+
+\texttt{overload} 类继承自其它类 \texttt{Ts...}，然后暴露它们的 \texttt{operator()}。这里使用自定义推导指引，是为了把一组 lambda 列表“转换”成我们可以派生的类列表。
+
+\begin{myInfoBox}
+该改动由 P0091R3\footnote{\url{http://wg21.link/p0091r3}} 与 P0433（标准库中的推导指引）\footnote{\url{https://wg21.link/p0433}} 提出。
+
+请注意，尽管某个编译器可能宣称对“类模板实参推导”提供了完整支持，但其对应的 STL 实现可能仍然缺少部分 STL 类型所需的自定义推导指引。请参阅本章末尾的“编译器支持”一节。
+\end{myInfoBox}
+
+\section{折叠表达式}
+
+C++11 引入了可变参数模板，这是一项强大的特性，尤其是在你想让函数接受数量可变的输入模板参数时。例如，在 C++11 之前（pre C++11），你不得不为模板函数编写多个不同的版本（一个对应一个参数，另一个对应两个参数，再一个对应三个参数……）。
+
+尽管如此，当你想实现类似 \texttt{sum}、\texttt{all} 这样的“递归”函数时，可变参数模板仍然需要一些额外的代码。你必须显式指定递归的规则。
+
+例如：
+
+\begin{codebox}[cpp]
+auto SumCpp11(){
+return 0;
+}
+template<typename T1, typename... T>
+auto SumCpp11(T1 s, T... ts){
+return s + SumCpp11(ts...);
+}
+\end{codebox}
+
+而借助 C++17，我们可以写出简单得多的代码：
+
+\begin{codebox}[cpp]
+template<typename ...Args> auto sum(Args ...args)
+{
+return (args + ... + 0);
+}
+// or even:
+template<typename ...Args> auto sum2(Args ...args)
+{
+return (args + ...);
+}
+\end{codebox}
+
+折叠表达式³ 存在以下带二元运算符（op）的变体：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X X X}
+\toprule
+表达式 & 名称 & 展开式 \\
+\midrule
+\texttt{(... op e)} & 一元左折叠 & \texttt{((e1 op e2) op ...) op eN} \\
+\texttt{(init op ... op e)} & 二元左折叠 & \texttt{(((init op e1) op e2) op ...) op eN} \\
+\texttt{(e op ...)} & 一元右折叠 & \texttt{e1 op (... op (eN-1 op eN))} \\
+\texttt{(e op ... op init)} & 二元右折叠 & \texttt{e1 op (... op (eN-1 op (eN op init)))} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\footnote{\url{https://en.cppreference.com/w/cpp/language/fold}}
+
+op 可以是下列 32 个二元运算符中的任意一个：\verb!+ - * / \% \^{} \& | = < > << >> += -= *= /= \%= \^{}= \&= |= <<= >>= == != <= >= \&\& || , .* ->*!。在二元折叠中，两个 op 必须相同。
+
+例如，当你写下：
+
+\begin{codebox}[cpp]
+template<typename ...Args> auto sum2(Args ...args)
+{
+return (args + ...); // unary right fold over '+'
+}
+auto value = sum2(1, 2, 3, 4);
+\end{codebox}
+
+模板函数会被展开为：
+
+\begin{codebox}[cpp]
+auto value = 1 + (2 + (3 + 4));
+\end{codebox}
+
+此外，对于空的参数包，默认会取下列值：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X X}
+\toprule
+运算符 & 默认值 \\
+\midrule
+\texttt{\&\&} & \texttt{true} \\
+\texttt{||} & \texttt{false} \\
+\texttt{,} & \texttt{void()} \\
+其它任意 & 非良构代码 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+这就是为什么不能在没有参数的情况下调用 \texttt{sum2()}：因为对运算符 \texttt{+} 的一元折叠，对空参数包并没有任何默认值。
+
+\subsection{更多示例}
+
+下面是一个相当漂亮的、使用折叠表达式实现的 \texttt{printf}（P0036R0⁴）：
+
+\begin{codebox}[cpp]
+template<typename ...Args>
+void FoldPrint(Args&&... args)
+{
+(std::cout << ... << std::forward<Args>(args)) << '\n';
+}
+FoldPrint("hello", 10, 20, 30);
+\end{codebox}
+
+不过，上面的 \texttt{FoldPrint} 会把参数一个接一个地打印出来，中间没有任何分隔符。因此对于上面的调用，你会在输出中看到 “hello102030”。
+
+如果你想要分隔符以及更多的格式化选项，就必须改变打印技巧，使用对逗号运算符的折叠：
+
+\begin{codebox}[cpp]
+template<typename ...Args>
+void FoldSeparateLine(Args&&... args)
+{
+auto separateLine = [](const auto& v) {
+std::cout << v << '\n';
+};
+(... , separateLine (std::forward<Args>(args))); // over comma operator
+}
+\end{codebox}
+
+这种利用逗号运算符折叠的技巧非常方便。它的另一个例子是一种特殊版本的 \texttt{push\_back}：
+
+\begin{codebox}[cpp]
+template<typename T, typename... Args>
+void push_back_vec(std::vector<T>& v, Args&&... args)
+{
+(v.push_back(std::forward<Args>(args)), ...);
+}
+std::vector<float> vf;
+push_back_vec(vf, 10.5f, 0.7f, 1.1f, 0.89f);
+\end{codebox}
+
+总的来说，折叠表达式能让你写出更干净、更简短，而且大概也更易读的代码。
+
+\begin{myInfoBox}
+该改动由 N4295⁵ 和 P0036R0⁶ 提出。
+\end{myInfoBox}
+
+\subsection{if constexpr}
+
+这是一项重磅特性！
+
+C++ 的编译期 if！
+
+该特性允许你根据一个常量表达式条件，在编译期丢弃 \texttt{if} 语句的分支。
+
+\begin{codebox}[cpp]
+if constexpr (cond)
+statement1; // Discarded if cond is false
+else
+statement2; // Discarded if cond is true
+\end{codebox}
+
+例如：
+
+\begin{codebox}[cpp]
+template <typename T>
+auto get_value(T t)
+{
+if constexpr (std::is_pointer_v<T>)
+return *t;
+else
+return t;
+}
+\end{codebox}
+
+if constexpr 有潜力大幅简化大量的模板代码——尤其是在使用标签分发（tag dispatching）、SFINAE 或预处理器技巧的场景下。
+
+\subsection{为什么需要编译期 if？}
+
+一开始，你也许会问：我们为什么需要 if constexpr 以及那些复杂的模板化表达式……普通的 \texttt{if} 难道不够用吗？
+
+下面是一个代码示例：
+
+\begin{codebox}[cpp]
+template <typename Concrete, typename... Ts>
+unique_ptr<Concrete> constructArgs(Ts&&... params)
+{
+if (is_constructible_v<Concrete, Ts...>) // normal `if`
+return make_unique<Concrete>(forward<Ts>(params)...);
+else
+return nullptr;
+}
+\end{codebox}
+
+上面的例程是 \texttt{make\_unique} 的“升级”版本：当参数允许它构造出被包装的对象时，它返回 \texttt{unique\_ptr}，否则返回 \texttt{nullptr}。
+
+下面是一段测试 \texttt{constructArgs} 的简单代码：
+
+\begin{codebox}[cpp]
+class Test
+{
+public:
+Test(int, int) { }
+};
+int main()
+{
+auto p = constructArgs<Test>(10, 10, 10); // 3 args!
+}
+\end{codebox}
+
+这段代码试图用三个参数来构造 \texttt{Test}，但请注意，\texttt{Test} 只有一个接受两个 \texttt{int} 参数的构造函数。
+
+编译时，你可能会得到类似这样的编译器错误：
+
+\begin{codebox}[cpp]
+In instantiation of 'typename std::_MakeUniq<_Tp>::__single_object std::make_unique(\
+_Args&& ...) [with _Tp = Test; _Args = {int, int, int}; typename std::_MakeUniq<_Tp>\
+::__single_object = std::unique_ptr<Test, std::default_delete<Test> >]':
+main.cpp:8:40:
+required from 'std::unique_ptr<_Tp> constructArgs(Ts&& ...) [with C\
+oncrete = Test; Ts = {int, int, int}]'
+\end{codebox}
+
+让我们试着理解这个错误信息。在模板推导之后，编译器会编译出如下代码：
+
+\begin{codebox}[cpp]
+if (std::is_constructible_v<Concrete, 10, 10, 10>)
+return std::make_unique<Concrete>(10, 10, 10);
+else
+return nullptr;
+\end{codebox}
+
+在运行时，\texttt{if} 分支不会被执行——因为 \texttt{is\_constructible\_v} 返回 \texttt{false}，但该分支里的代码必须能够通过编译。
+
+这正是我们需要 if constexpr 的原因：去“丢弃”代码，只编译匹配的那个语句。
+
+要修复这段代码，只需加上 \texttt{constexpr}：
+
+\begin{codebox}[cpp]
+template <typename Concrete, typename... Ts>
+unique_ptr<Concrete> constructArgs(Ts&&... params)
+{
+if constexpr (is_constructible_v<Concrete, Ts...>) // fixed!
+return make_unique<Concrete>(forward<Ts>(params)...);
+else
+return nullptr;
+}
+\end{codebox}
+
+现在，编译器会在编译期求值 if constexpr 的条件；对于表达式 \texttt{auto p = constructArgs<Test>(10, 10, 10);}，整个 \texttt{if} 分支会从编译过程的第二步起被“移除”。
+
+准确地说，被丢弃分支中的代码并没有被完全移出编译阶段。只有那些依赖于条件中所用模板参数的表达式不会被实例化。语法本身必须始终是合法的。
+
+例如：
+
+\begin{codebox}[cpp]
+template <typename T>
+void Calculate(T t)
+{
+if constexpr (is_integral_v<T>)
+{
+// ...
+static_assert(sizeof(int) == 100);
+}
+else
+{
+execute(t);
+strange syntax
+}
+}
+\end{codebox}
+
+在上面这段刻意构造的代码中，如果类型 \texttt{T} 是 \texttt{int}，那么 \texttt{else} 分支会被丢弃，这意味着 \texttt{execute(t)} 不会被实例化。但 \texttt{strange syntax} 这一行仍然会被编译（因为它并不依赖于 \texttt{T}），所以你会因此得到一个编译错误。
+
+此外，另一个编译错误会来自 \texttt{static\_assert}：该表达式同样不依赖于 \texttt{T}，所以它总是会被求值。
+
+\subsection{模板代码简化}
+
+在 C++17 之前，如果你针对某个算法有多个版本——取决于类型需求——你可以使用 SFINAE 或标签分发来生成一组专门的重载决议集合。
+
+例如：
+
+\begin{codebox}[cpp]
+// Chapter Templates/sfinae_example.cpp
+template <typename T>
+std::enable_if_t<std::is_integral_v<T>, T> simpleTypeInfo(T t)
+{
+std::cout << "foo<integral T> " << t << '\n';
+return t;
+}
+template <typename T>
+std::enable_if_t<!std::is_integral_v<T>, T> simpleTypeInfo(T t)
+{
+std::cout << "not integral \n";
+return t;
+}
+\end{codebox}
+
+在上面的例子中，我们有两个函数实现，但只有一个会进入重载决议集合。如果 \texttt{std::is\_integral\_v} 对类型 \texttt{T} 为 \texttt{true}，就采用上面的函数，而第二个则因 SFINAE 被拒绝。
+
+使用标签分发时也会发生同样的事情：
+
+\begin{codebox}[cpp]
+// Chapter Templates/tag_dispatching_example.cpp
+template <typename T>
+T simpleTypeInfoTagImpl(T t, std::true_type)
+{
+std::cout << "foo<integral T> " << t << '\n';
+return t;
+}
+template <typename T>
+T simpleTypeInfoTagImpl(T t, std::false_type)
+{
+std::cout << "not integral \n";
+return t;
+}
+template <typename T>
+T simpleTypeInfoTag(T t)
+{
+return simpleTypeInfoTagImpl(t, std::is_integral<T>{});
+}
+\end{codebox}
+
+这里我们没有使用 SFINAE，而是为条件生成了一个唯一的类型标签：\texttt{true\_type} 或 \texttt{false\_type}。根据结果，只会选中一个实现。
+
+现在，我们可以用 if constexpr 来简化这个模式：
+
+\begin{codebox}[cpp]
+template <typename T>
+T simpleTypeInfo(T t)
+{
+if constexpr (std::is_integral_v<T>)
+{
+std::cout << "foo<integral T> " << t << '\n';
+}
+else
+{
+std::cout << "not integral \n";
+}
+return t;
+}
+\end{codebox}
+
+编写模板代码变得更“自然”，也不再需要那么多“技巧”。
+
+\subsection{示例}
+
+我们来看几个例子：
+
+\mySmallsection{Line Printer}
+
+你可能已经在本部分开头“快速上手（Jump Start）”一节中见过下面的例子。让我们深入细节，看看这段代码是如何工作的。
+
+\begin{codebox}[cpp]
+template<typename T> void linePrinter(const T& x)
+{
+if constexpr (std::is_integral_v<T>)
+{
+std::cout << "num: " << x << '\n';
+}
+else if constexpr (std::is_floating_point_v<T>)
+{
+const auto frac = x - static_cast<long>(x);
+std::cout << "flt: " << x << ", frac " << frac << '\n';
+}
+else if constexpr(std::is_pointer_v<T>)
+{
+std::cout << "ptr, ";
+linePrinter(*x);
+}
+else
+{
+std::cout << x << '\n';
+}
+}
+\end{codebox}
+
+\texttt{linePrinter} 使用 if constexpr 来检查输入类型。据此，我们可以输出额外的信息。指针类型的情况很有意思——当检测到指针时，代码会先对其解引用，然后递归调用 \texttt{linePrinter}。
+
+\mySmallsection{声明自定义的 get<N> 函数}
+
+结构化绑定表达式适用于拥有全部公有成员、形如这样的简单结构：
+
+\begin{codebox}[cpp]
+struct S
+{
+int n;
+std::string s;
+float d;
+};
+S s;
+auto [a, b, c] = s;
+\end{codebox}
+
+不过，如果你有一个自定义类型（带有私有成员），也可以通过重写 \texttt{get<N>} 函数来让结构化绑定生效。下面这段代码演示了这个思路：
+
+\begin{codebox}[cpp]
+class MyClass
+{
+public:
+int GetA() const { return a; }
+float GetB() const { return b; }
+private:
+int a;
+float b;
+};
+template <std::size_t I> auto get(MyClass& c)
+{
+if constexpr (I == 0)
+return c.GetA();
+else if constexpr (I == 1) return c.GetB();
+}
+// specialisations to support tuple-like interface
+namespace std
+{
+template <> struct tuple_size<MyClass> : std::integral_constant<size_t, 2> { };
+template <> struct tuple_element<0,MyClass> { using type = int; };
+template <> struct tuple_element<1,MyClass> { using type = float; };
+}
+\end{codebox}
+
+在上面的代码中，你享有把一切都放在一个函数里的好处。当然也可以用模板特化来实现：
+
+\begin{codebox}[cpp]
+template <> auto& get<0>(MyClass &c) { return c.GetA(); }
+template <> auto& get<1>(MyClass &c) { return c.GetB(); }
+\end{codebox}
+
+更多示例，你可以阅读关于“用 if constexpr 替换 std::enable\_if”的那一章，以及“结构化绑定”一章中有关自定义 \texttt{get<N>} 特化的小节。
+
+你还可以在 bfilipek.com 上看到这篇博客文章：Simplify code with 'if constexpr' in C++17\footnote{\url{https://www.bfilipek.com/2018/03/ifconstexpr.html}}
+
+\begin{myInfoBox}
+该改动由 P0292R2⁸ 提出。
+\end{myInfoBox}
+
+\section{用 auto 声明非类型模板参数}
+
+这是“处处使用 auto”战略的又一部分。在 C++11 和 C++14 中，你可以用它来自动推导变量、甚至返回类型，此外还有泛型 lambda。现在，你也可以把它用于推导非类型模板参数。
+
+例如：
+
+\begin{codebox}[cpp]
+template <auto value> void f() { }
+f<10>();
+// deduces int
+\end{codebox}
+
+这很有用，因为你不必为非类型参数的类型单独写一个参数了。
+
+就像在 C++11/14 中那样：
+
+\begin{codebox}[cpp]
+template <typename Type, Type value> constexpr Type TConstant = value;
+constexpr auto const MySuperConst = TConstant<int, 100>;
+\end{codebox}
+
+有了 C++17，就稍微简单一些：
+
+\begin{codebox}[cpp]
+template <auto value> constexpr auto TConstant = value;
+constexpr auto const MySuperConst = TConstant<100>;
+\end{codebox}
+
+无需显式写出 \texttt{Type}。
+
+许多论文和文章都把下面这个异构编译期列表作为高级用法的例子：
+
+\begin{codebox}[cpp]
+template <auto ... vs> struct HeterogenousValueList {};
+using MyList = HeterogenousValueList<'a', 100, 'b'>;
+\end{codebox}
+
+在 C++17 之前，无法直接声明这样的列表，必须先提供一个包装类。
+
+\begin{myInfoBox}
+该改动由 P0127R2⁹ 提出。在 P0127R1¹⁰ 中，你可以找到更多示例与推导过程。
+\end{myInfoBox}
+
+\section{其他改动}
+
+在 C++17 中，还有其它一些与模板相关的语言特性值得一提：
+
+在模板的模板参数中允许使用 typename。
+
+允许你在声明模板的模板参数时使用 \texttt{typename} 而不是 \texttt{class}。普通类型参数可以互换使用这两者，但模板的模板参数此前被限制只能使用 \texttt{class}。
+
+更多信息见 N4051¹¹。
+
+允许对所有非类型模板实参进行常量求值。
+
+移除对作为非类型模板参数出现的指针、引用以及指向成员的指针的语法限制。
+
+更多信息见 N4268¹²。
+
+类型特征的变量模板。
+
+所有产生 \texttt{::value} 的类型特征都获得了配套的 \texttt{\_v} 变量模板。例如：
+
+\texttt{std::is\_integral<T>::value} 可以写成 \texttt{std::is\_integral\_v<T>}
+
+\texttt{std::is\_class<T>::value} 可以写成 \texttt{std::is\_class\_v<T>}
+
+这一改进延续了 C++14 中为返回 \texttt{::type} 的类型特征添加 \texttt{\_t} 后缀（模板别名）的做法。
+
+更多信息见 P0006R0¹³。
+
+using 声明中的包展开。
+
+该特性是对可变参数模板和参数包的一项增强。
+
+编译器现在支持在包展开中使用 \texttt{using} 关键字：
+
+\begin{codebox}[cpp]
+template<class... Ts> struct overloaded : Ts... {
+using Ts::operator()...;
+};
+\end{codebox}
+
+\texttt{overloaded} 类暴露了来自基类的所有 \texttt{operator()} 重载。在 C++17 之前，你必须对参数包使用递归才能达到相同效果。\texttt{overloaded} 模式对 \texttt{std::visit} 来说是一项非常有用的增强，详见“变体（Variant）”一章中的“Overload”小节。
+
+更多信息见 P0195¹⁴。
+
+逻辑运算元函数。
+
+C++17 增加了一些好用的模板元函数：
+
+\begin{itemize}
+\item \texttt{template<class... B> struct conjunction;} —— 逻辑与（logical AND）
+\item \texttt{template<class... B> struct disjunction;} —— 逻辑或（logical OR）
+\item \texttt{template<class B> struct negation;} —— 逻辑非（logical negation）
+\end{itemize}
+
+下面是一个基于提案代码的例子：
+
+\begin{codebox}[cpp]
+template<typename... Ts>
+std::enable_if_t<std::conjunction_v<std::is_same<int, Ts>...> >
+PrintIntegers(Ts ... args)
+{
+(std::cout << ... << args) << '\n';
+}
+\end{codebox}
+
+上面的函数 \texttt{PrintIntegers} 可以接受数量可变的参数，但它们都必须是 \texttt{int} 类型。
+
+这些辅助元函数能提升高级模板代码的可读性。
+
+更多信息见 P0013¹⁵。
+
+\section{编译器支持}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+类模板实参推导 & 7.0/8.0\textsuperscript{16} & 5.0 & VS 2017 15.7 \\
+标准库中的推导指引 & 8.0\textsuperscript{17} & 7.0/in progress\textsuperscript{18} & VS 2017 15.7 \\
+用 auto 声明非类型模板参数 & 7.0 & 4.0 & VS 2017 15.7 \\
+折叠表达式 & 6.0 & 3.9 & VS 2017 15.5 \\
+if constexpr & 7.0 & 3.9 & VS 2017 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\par\smallskip
+\noindent\textsuperscript{16} 关于类模板实参推导（Template Argument Deduction for Class Templates）的额外改进在 GCC 8.0（P0512R0）中实现。
+
+\noindent\textsuperscript{17} LibSTDC++ 的状态页并未列出推导指引，因此我们可以假定它们是作为类模板实参推导的一部分实现的。
+
+\noindent\textsuperscript{18} LibC++ 的状态页提到，目前 <string>、序列容器、容器适配器以及 <regex> 部分已经实现。

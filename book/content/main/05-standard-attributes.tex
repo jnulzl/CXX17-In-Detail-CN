@@ -1,0 +1,388 @@
+% =============================================================================
+%  main/05-standard-attributes.tex  ——  5. 标准属性
+%  译自 work/chapters\_clean/main\_\_05-standard-attributes.txt
+% =============================================================================
+
+代码注解——也就是属性（attributes）——大概不是 C++ 中最广为人知的特性。不过，它们对于向编译器以及其它程序员表达额外信息来说，可能相当顺手。自 C++11 起，就出现了一种指定属性的标准方式。而在 C++17 中，你又得到了更多与属性相关的实用增补。
+
+本章你将学习：
+
+\begin{itemize}
+\item C++ 中的属性是什么
+\item 厂商特定的代码注解与标准形式的对比
+\item 在哪些场景下属性能派上用场
+\item C++11 与 C++14 的属性
+\item C++17 中的新增内容
+\end{itemize}
+
+\section{为什么我们需要属性？}
+
+你是否在自己的代码里用过 \texttt{\_\_declspec}、\texttt{\_\_attribute} 或者 \texttt{\#pragma} 指令？举个例子：
+
+\begin{codebox}[cpp]
+// set an alignment
+struct S { short f[3]; } __attribute__ ((aligned (8)));
+// this function won't return
+void fatal () __attribute__ ((noreturn));
+\end{codebox}
+
+或者在 MSVC 中用于 DLL 的导入/导出：
+
+\begin{codebox}[cpp]
+#if COMPILING_DLL
+#define DLLEXPORT __declspec(dllexport)
+#else
+#define DLLEXPORT __declspec(dllimport)
+#endif
+\end{codebox}
+
+这些都是现有的、编译器特定的属性/注解形式。
+
+那么，属性到底是什么？
+
+属性是一种附加信息，编译器可以用它来生成代码。它可能被用于优化，或者被用于某些特定的代码生成（比如 DLL 相关、OpenMP 等）。此外，注解能让你写出更具表达力的语法，并帮助其他开发者理解代码的意图。
+
+与其它的语言（例如 C\#）不同，在 C++ 中，编译器固定了元信息。你无法添加用户自定义的属性。而在 C\# 中，你可以从 \texttt{System.Attribute} 派生。
+
+现代 C++ 属性最棒的地方是什么？
+
+借助现代 C++，我们获得了越来越多可在其它编译器上工作的标准化属性。因此，我们正在从编译器特定的注解转向标准形式。
+
+在下一节中，你将看到 C++11 之前属性是如何工作的。
+
+\section{C++11 之前}
+
+各家编译器都引入了自己的一套注解，通常各自使用不同的关键字。你常常会看到代码里散布着 \texttt{\#pragma}、\texttt{\_declspec}、\texttt{\_\_attribute}。
+
+下面是 GCC/Clang 与 MSVC 的常见语法清单：
+
+\subsection{GCC 特定的属性}
+
+GCC 以 \texttt{\_\_attribute\_\_((attr\_name))} 的形式使用注解。例如：
+
+\begin{codebox}[cpp]
+int square (int) __attribute__ ((pure)); // pure function
+\end{codebox}
+
+相关文档：
+
+\begin{itemize}
+\item Attribute Syntax —— 使用 GNU 编译器套装（GCC）\footnote{\url{https://gcc.gnu.org/onlinedocs/gcc-4.8.1/gcc/Attribute-Syntax.html}}
+\item 使用 GNU 编译器套装（GCC）：通用函数属性\footnote{\url{https://gcc.gnu.org/onlinedocs/gcc/Common-Function-Attributes.html\#Common-Function-Attributes}}
+\end{itemize}
+
+\subsection{MSVC 特定的属性}
+
+微软大多使用 \texttt{\_\_declspec} 关键字，作为各种编译器扩展的语法。相关文档请见：\texttt{\_\_declspec}（Microsoft Docs）\footnote{\url{https://docs.microsoft.com/en-Us/cpp/cpp/declspec}}。
+
+\begin{codebox}[cpp]
+__declspec(deprecated) void LegacyCode() { }
+\end{codebox}
+
+\subsection{Clang 特定的属性}
+
+Clang 由于易于定制，能够支持不同类型的注解，因此请查阅其文档以了解更多信息。GCC 的大部分属性在 Clang 中都能工作。相关文档请见：Attributes in Clang —— Clang 文档\footnote{\url{https://clang.llvm.org/docs/AttributeReference.html}}。
+
+\section{C++11 与 C++14 中的属性}
+
+C++11 迈出了一大步，将使用厂商特定语法的需求降到最低。通过引入标准格式，我们可以把大量编译器特定的属性纳入通用集合。C++11 提供了一种更优雅的格式，用来在我们的代码上标注注解。
+
+基本语法就是 \texttt{\texttt{\texttt{[[attr]]}}} 或 \texttt{\texttt{\texttt{[[namespace::attr]]}}}。
+
+你几乎可以把 \texttt{\texttt{\texttt{[[attr]]}}} 用在一切东西上：类型、函数、枚举，等等等等。
+
+例如：
+
+\begin{codebox}[cpp]
+[[abc]] void foo()
+{
+}
+\end{codebox}
+
+在 C++11 中，我们有如下属性：
+
+\texttt{\texttt{\texttt{[[noreturn]]}}}：
+
+函数不返回。如果带有此属性的函数返回了，则行为未定义。
+
+\begin{itemize}
+\item 例如 \texttt{\texttt{\texttt{[[noreturn]]}} void terminate() noexcept;}
+\item 像 \texttt{std::abort} 或 \texttt{std::exit} 这样的函数都标有此属性。
+\end{itemize}
+
+\texttt{\texttt{\texttt{[[carries\_dependency]]}}}：
+
+表示在 release-consume 的 \texttt{std::memory\_order} 中，依赖链会在函数内外传播，这使得编译器可以跳过不必要的内存屏障指令。主要是为了帮助优化多线程代码，以及在使用不同内存模型时发挥作用。
+
+C++14 增加了：
+
+\texttt{\texttt{\texttt{[[deprecated]]}}} 与 \texttt{\texttt{\texttt{[[deprecated("reason")]]}}}：
+
+标有此属性的代码会被编译器报告出来。你可以设定一个“原因”。
+
+\texttt{\texttt{\texttt{[[deprecated]]}}} 的例子：
+
+\begin{codebox}[cpp]
+[[deprecated("use AwesomeFunc instead")]] void GoodFunc() { }
+// call somewhere:
+GoodFunc();
+\end{codebox}
+
+GCC 可能会报告一个警告：
+
+\begin{codebox}
+warning: 'void GoodFunc()' is deprecated: use AwesomeFunc instead
+[-Wdeprecated-declarations]
+\end{codebox}
+
+你已经对旧的方式、以及 C++11/14 的新方式略有了解……那么 C++17 又带来了什么？
+
+\section{C++17 中的新增内容}
+
+借助 C++17，我们新增了三个标准属性：
+
+\begin{itemize}
+\item \texttt{\texttt{[[fallthrough]]}}
+\item \texttt{\texttt{[[nodiscard]]}}
+\item \texttt{\texttt{[[maybe\_unused]]}}
+\end{itemize}
+
+此外还有三个支撑特性。
+
+\begin{myInfoBox}
+这些新属性在 P0188\footnote{\url{https://wg21.link/p0188}} 与 P0068\footnote{\url{https://wg21.link/p0068}}（设计缘由）中得以规定。
+\end{myInfoBox}
+
+我们先来逐一了解这些新属性：
+
+\subsection{\texttt{\texttt{[[fallthrough]]}} 属性}
+
+表示 switch 语句中的 fall-through（贯穿）是有意为之的，因此不应为此发出警告。
+
+\begin{codebox}[cpp]
+switch (c) {
+case 'a':
+f(); // 警告！fallthrough 可能是程序员的笔误
+case 'b':
+g();
+[[fallthrough]]; // 已抑制警告，fallthrough 是故意的
+case 'c':
+h();
+}
+\end{codebox}
+
+借助此属性，编译器能够理解程序员的意图。而且相比用注释，它也要易读得多。
+
+\subsection{\texttt{\texttt{[[maybe\_unused]]}} 属性}
+
+当实体以 \texttt{\texttt{\texttt{[[maybe\_unused]]}}} 声明时，抑制编译器针对未使用实体发出的警告。
+
+\begin{codebox}[cpp]
+static void impl1() { ... } // Compilers may warn about this
+[[maybe_unused]] static void impl2() { ... } // Warning suppressed
+void foo() {
+int x = 42; // Compilers may warn about this
+[[maybe_unused]] int y = 42; // Warning suppressed
+}
+\end{codebox}
+
+\subsection{\texttt{\texttt{[[nodiscard]]}} 属性}
+
+\texttt{\texttt{\texttt{[[nodiscard]]}}} 可以施加于函数或类型声明上，以标记返回值的重要性：
+
+\begin{codebox}[cpp]
+[[nodiscard]] int Compute();
+void Test() {
+Compute(); // 警告！一个
+// nodiscard 函数的返回值被丢弃了
+}
+\end{codebox}
+
+如果你忘记把结果赋给某个变量，那么编译器就应当发出警告。
+
+这意味着你可以强制用户去处理错误。例如，如果你忘了使用 \texttt{new} 或 \texttt{std::async()} 的返回值，会发生什么？
+
+此外，此属性也能施加于类型之上。一个可能的用例是错误码：
+
+\begin{codebox}[cpp]
+enum class [[nodiscard]] ErrorCode {
+OK,
+Fatal,
+System,
+FileIssue
+};
+ErrorCode OpenFile(std::string_view fileName);
+ErrorCode SendEmail(std::string_view sendto,
+std::string_view text);
+ErrorCode SystemCall(std::string_view text);
+\end{codebox}
+
+如今，每当你想要调用这样的函数时，你都会被“强制”去检查返回值。对于重要的函数而言，检查返回码可能至关重要，而使用 \texttt{\texttt{\texttt{[[nodiscard]]}}} 或许能帮你避免一些 bug。
+
+你或许还会问：所谓“使用”一个返回值，究竟是什么意思？
+
+在标准里，它被定义为 Discarded-value expressions\footnote{\url{http://en.cppreference.com/w/cpp/language/expressions\#Discarded-value_expressions}}（被丢弃值的表达式），所以，如果你的函数只是为了副作用而被调用（周围没有 if 语句或赋值），那么编译器应当报告一个警告。
+
+不过，要抑制该警告，你可以显式地把返回值转型为 \texttt{void}，或者使用 \texttt{\texttt{\texttt{[[maybe\_unused]]}}}：
+
+\begin{codebox}[cpp]
+[[nodiscard]] int Compute();
+void Test() {
+static_cast<void>(Compute()); // fine...
+[[maybe_unused]] auto ret = Compute();
+}
+\end{codebox}
+
+此外，在 C++20 中，标准库会在几处应用 \texttt{\texttt{\texttt{[[nodiscard]]}}}：\texttt{operator new}、\texttt{std::async()}、\texttt{std::allocate()}、\texttt{std::launder()}，以及 \texttt{std::empty()}。
+
+这一特性已经通过 P0600R1\footnote{\url{http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0600r1.pdf}} 合入了 C++20。
+
+\subsection{命名空间与枚举项上的属性}
+
+C++11 中属性的本意是，能够把它们应用到所有合理的位置，例如：类、函数、变量、typedef、模板、枚举……但是在规范中存在一个问题，导致当属性施加于命名空间或枚举项时会受阻。
+
+这一问题在 C++17 中得到了修正。现在我们可以写成：
+
+\begin{codebox}[cpp]
+namespace [[deprecated("use BetterUtils")]] GoodUtils {
+void DoStuff() { }
+}
+\end{codebox}
+
+\begin{codebox}[cpp]
+namespace BetterUtils {
+void DoStuff() { }
+}
+int main()
+{
+GoodUtils::DoStuff();
+}
+\end{codebox}
+
+Clang 会报告：
+
+\begin{codebox}
+warning: 'GoodUtils' is deprecated: use BetterUtils
+[-Wdeprecated-declarations]
+\end{codebox}
+
+另一个例子是在枚举项上使用 deprecated 属性：
+
+\begin{codebox}[cpp]
+enum class ColorModes
+{
+RGB [[deprecated("use RGB8")]],
+RGBA [[deprecated("use RGBA8")]],
+RGBA16F,
+RGB8,
+RGBA8
+};
+// use:
+auto colMode = ColorModes::RGBA;
+\end{codebox}
+
+在 GCC 下我们会得到：
+
+\begin{codebox}
+warning: 'RGBA' is deprecated: use RGBA8
+[-Wdeprecated-declarations]
+\end{codebox}
+
+\begin{myInfoBox}
+这一改动在 N4266\footnote{\url{https://wg21.link/n4266}}（措辞）与 N4196\footnote{\url{https://wg21.link/n4196}}（设计缘由）中有所描述。
+\end{myInfoBox}
+
+\subsection{忽略未知属性}
+
+这一特性主要是为了澄清。
+
+在 C++17 之前，如果你尝试使用某个编译器特定的属性，那么在另一个不支持它的编译器上编译时，你甚至可能得到一个错误。现在，编译器会略过该属性说明，并且不会报告任何信息（或者只报告一个警告）。这一点之前在标准里并未提及，因此需要澄清。
+
+\begin{codebox}[cpp]
+// compilers which don't
+// support MyCompilerSpecificNamespace will ignore this attribute
+[[MyCompilerSpecificNamespace::do_special_thing]]
+void foo();
+\end{codebox}
+
+例如在 GCC 7.1 中会出现如下警告：
+
+\begin{codebox}
+warning: 'MyCompilerSpecificNamespace::do_special_thing'
+scoped attribute directive ignored [-Wattributes]
+void foo();
+\end{codebox}
+
+\begin{myInfoBox}
+这一改动在 P0283R2\footnote{\url{https://wg21.link/p0283r2}}（措辞）与 P0283R1\footnote{\url{https://wg21.link/p0283r1}}（设计缘由）中有所描述。
+\end{myInfoBox}
+
+\subsection{无重复地使用属性命名空间}
+
+这一特性简化了你想使用多个属性的情形，例如：
+
+\begin{codebox}[cpp]
+void f() {
+[[rpr::kernel, rpr::target(cpu,gpu)]] // repetition
+doTask();
+}
+\end{codebox}
+
+提议的改法：
+
+\begin{codebox}[cpp]
+void f() {
+[[using rpr: kernel, target(cpu,gpu)]]
+doTask();
+}
+\end{codebox}
+
+这种简化在构建工具、把此类带注解的代码自动翻译为不同的编程模型时，可能会有所帮助。
+
+\begin{myInfoBox}
+更多细节见：P0028R4\footnote{\url{http://wg21.link/p0028r4}}。
+\end{myInfoBox}
+
+\section{本章小结}
+
+C++17 中可用的全部属性：
+
+\begin{itemize}
+\item \texttt{\texttt{[[noreturn]]}}
+\item \texttt{\texttt{[[carries\_dependency]]}}
+\item \texttt{\texttt{[[deprecated]]}}
+\item \texttt{\texttt{[[deprecated("reason")]]}}
+\item \texttt{\texttt{[[fallthrough]]}}
+\item \texttt{\texttt{[[nodiscard]]}}
+\item \texttt{\texttt{[[maybe\_unused]]}}
+\end{itemize}
+
+每家编译器厂商都可以规定自己的语法，以及可用的属性与扩展清单。
+
+在现代 C++ 中，委员会试图为属性抽取出通用的部分。目标是只使用标准属性，但这取决于你的平台。例如，在嵌入式环境中，可能存在大量关键的、平台特定的注解，它们把代码与硬件粘合在一起。
+
+还有一段来自 Bjarne Stroustrup 的 C++11 FAQ/Attributes\footnote{\url{http://stroustrup.com/C++11FAQ.html\#attributes}} 的相当重要的引文：
+
+\begin{myQuote}
+有一种合理的担忧，即属性会被用来创造语言方言。建议是：只把属性用于那些不影响程序含义、但可能有助于发现错误（例如 \texttt{\texttt{[[noreturn]]}}）或有助于优化器（例如 \texttt{\texttt{[[carries\_dependency]]}}）的事情上。
+\end{myQuote}
+
+\section{编译器支持}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+\texttt{\texttt{[[fallthrough]]}} & 7.0 & 3.9 & 15.0 \\
+\texttt{\texttt{[[nodiscard]]}} & 7.0 & 3.9 & 15.3 \\
+\texttt{\texttt{[[maybe\_unused]]}} & 7.0 & 3.9 & 15.3 \\
+命名空间与枚举项上的属性 & 4.9/6\footnote{GCC 4.9（命名空间）/ GCC 6（枚举项）} & 3.4 & 14.0 \\
+忽略未知属性 & All versions & 3.9 & 14.0 \\
+无重复地使用属性命名空间 & 7.0 & 3.9 & 15.3 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+上述所有编译器也都支持 C++11/14 的属性。

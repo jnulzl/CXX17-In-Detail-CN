@@ -1,0 +1,170 @@
+\section{\texttt{\texttt{[[nodiscard]]}}}
+
+C++17 带来了几个新的标准属性。借助这些额外的注解，你不但能让代码对其他开发者更易读，编译器也能利用这些信息。例如，它可能针对潜在的错误产生更多警告；或者相反，当它察觉到明确的意图（比如使用 \texttt{\texttt{[[maybe\_unused]]}}）时，也能避免产生警告。在本章中，你将看到如何用一个属性——\texttt{\texttt{[[nodiscard]]}}——来为代码提供更强的安全性。
+
+\section{简介}
+
+\texttt{\texttt{[[nodiscard]]}} 属性在第 5 章的标准属性一节中已经提到过，但这里通过一个简单示例来回顾它的特性。该属性用于标记函数的返回值：
+
+\begin{codebox}[cpp]
+[[nodiscard]] int Compute();
+\end{codebox}
+
+当你调用这样的函数却没有把结果赋值出去时：
+
+\begin{codebox}[cpp]
+void Foo() {
+Compute();
+}
+\end{codebox}
+
+你应该会收到如下（或类似的）警告：
+
+\begin{codebox}
+warning: ignoring return value of 'int Compute()',
+declared with attribute nodiscard
+\end{codebox}
+
+我们可以更进一步，不只标记返回值，而是标记一整个类型：
+
+\begin{codebox}[cpp]
+[[nodiscard]] struct SuperImportantType { }
+SuperImportantType CalcSuperImportant();
+SuperImportantType OtherFoo();
+SuperImportantType Calculate();
+\end{codebox}
+
+这样，每当你调用任何返回 \texttt{SuperImportantType} 的函数时，都会收到警告。
+
+换句话说，你可以为一个函数强化代码契约，使调用者不会跳过返回值。有时这种遗漏会导致 bug，因此使用 \texttt{\texttt{[[nodiscard]]}} 能提升代码安全性。
+
+编译器会生成警告，但通常更好的做法是在构建代码时开启“将警告视为错误”。MSVC 中使用 \texttt{/WX}，GCC 中使用 \texttt{-Werror}。错误会中止编译过程，因此程序员必须采取相应措施修正代码。
+
+\section{可以在哪些地方使用？}
+
+属性是一种标准化的代码注解方式。它们是可选的，但能帮助编译器优化代码、检测潜在错误，或者以清晰的方式表达程序员的意图。以下是 \texttt{\texttt{[[nodiscard]]}} 可能派上用场的一些地方：
+
+\subsection{错误码}
+
+\texttt{\texttt{[[nodiscard]]}} 一个关键的使用场景是错误码。你有多少次忘记检查函数返回的错误码？（如果你不依赖异常，这一点尤为关键）。
+
+\begin{codebox}[cpp]
+enum class [[nodiscard]] ErrorCode {
+OK,
+Fatal,
+System,
+FileIssue
+};
+\end{codebox}
+
+如果我们还有这样几个函数：
+
+\begin{codebox}[cpp]
+ErrorCode OpenFile(std::string_view fileName);
+ErrorCode SendEmail(std::string_view sendto,
+std::string_view text);
+ErrorCode SystemCall(std::string_view text);
+\end{codebox}
+
+现在，每当你想要调用这样的函数时，都会被“强制”去检查返回值。你经常会看到这样的代码：开发者只检查了其中几个函数调用，而其它调用却没有检查。这会造成不一致，并可能导致一些严重的运行时错误。
+
+你以为自己的方法运行正常（因为 M 次调用中有 N 次返回了 OK），却仍然有地方出错。你用调试器排查，才发现 Y 函数返回了 FAIL，而你却没有检查它。
+
+你应当用 \texttt{\texttt{[[nodiscard]]}} 来标记错误类型，还是只标记某些关键函数？对于那些在整个应用程序中都可见的错误码，这样做可能是正确的选择。当然，当你的函数只返回 \texttt{bool} 时，你只能标记函数本身，而无法标记类型（或者你可以创建一个 typedef/别名，然后用 \texttt{\texttt{[[nodiscard]]}} 标记它）。
+
+\subsection{工厂 / 句柄}
+
+另一类 \texttt{\texttt{[[nodiscard]]}} 能发挥价值的重要函数是“工厂”函数。每次调用“make/create/build”时，你都不希望跳过返回值。这也许显而易见，但在某些情况下（尤其是进行重构时），你可能会忘记检查，或者把它注释掉。
+
+\begin{codebox}[cpp]
+[[nodiscard]] Foo MakeFoo();
+\end{codebox}
+
+\subsection{何时返回非平凡类型？}
+
+来看看这样的代码：
+
+\begin{codebox}[cpp]
+std::vector<std::string> GenerateNames();
+\end{codebox}
+
+返回的类型看起来很“重”，所以通常意味着你之后必须用到它。另一方面，即使是一个 \texttt{int}，在给定问题的语义下也可能很重要。
+
+\subsection{没有副作用的代码？}
+
+上一节中的代码：
+
+\begin{codebox}[cpp]
+std::vector<std::string> GenerateNames(); // 没有副作用……
+\end{codebox}
+
+也是无副作用函数的一个例子——调用期间不会改变任何全局状态。在这种情况下，我们需要对返回值做点什么。否则，该函数调用可能会从代码中被移除或优化掉。
+
+\subsection{到处都用？！}
+
+有一份论文可以作为“指南”：P0600R0 —— 库中的 \texttt{\texttt{[[nodiscard]]}}\footnote{\url{https://wg21.link/p0600r0}}。该提案未能进入 C++17，但在 C++20 中被采纳。它建议了几个应当应用该属性的地方。
+
+对于已有的 API：
+\begin{itemize}
+\item 不使用返回值始终是“巨大的错误”（例如总是导致资源泄漏）；
+\item 不使用返回值是麻烦的根源，且很容易发生（难以察觉哪里出了问题）。
+\end{itemize}
+
+对于新的 API（尚未进入 C++ 标准）：
+\begin{itemize}
+\item 不使用返回值通常就是错误。
+\end{itemize}
+
+以下是几个应当添加该新属性的例子：
+\begin{itemize}
+\item \texttt{malloc()}/\texttt{new}/\texttt{allocate} —— 调用代价高昂，通常不使用返回值会导致资源泄漏；
+\item \texttt{std::async()} —— 不使用返回值会使调用变成同步的，而这往往难以察觉。
+\end{itemize}
+
+另一方面，像 \texttt{top()} 这样的函数则值得商榷，因为“用处不大，但也没有危险，而且可能存在这样的代码”。
+
+最好不要在代码的每个地方都加上 \texttt{\texttt{[[nodiscard]]}}，而应聚焦于关键之处。正如前面提到的，错误码和工厂函数是不错的起点。
+
+\section{如何忽略 \texttt{\texttt{[[nodiscard]]}}}
+
+使用 \texttt{\texttt{[[nodiscard]]}} 时，你应该使用返回值——将其赋值给变量，或直接加以利用。如果忘了，你会收到“未使用变量”的警告。
+
+在某些情况下，你可能想抑制这样的警告。为此，可以使用 C++17 中的另一个属性：\texttt{\texttt{[[maybe\_unused]]}}：
+
+\begin{codebox}[cpp]
+[[nodiscard]] int Compute() { return 42; }
+[[maybe_unused]] auto t = Compute();
+\end{codebox}
+
+此外，正如标准属性一章中提到的，你可以把函数调用强制转换为 \texttt{void}，这样编译器就会认为你“使用了”该值：
+
+\begin{codebox}[cpp]
+[[nodiscard]] int Compute();
+static_cast<void>(Compute()); // 已使用
+\end{codebox}
+
+另一个不错的办法是写一个独立的函数，把结果包起来并假装使用了它\footnote{由 Arne Mertz 建议}：
+
+\begin{codebox}[cpp]
+template <class T> inline void discard_on_purpose(T&&) {}
+// 使用示例：
+discard_on_purpose(Compute());
+\end{codebox}
+
+使用这些技巧来规避 \texttt{\texttt{[[nodiscard]]}} 警告时要小心。与其人为地绕过它，不如遵循该属性的规则。
+
+\section{C++17 之前}
+
+进入标准的大部分属性都源自编译器扩展，\texttt{\texttt{[[nodiscard]]}} 也是如此。
+
+例如，在 GCC/Clang 中，你可以使用：
+
+\begin{codebox}[cpp]
+__attribute__((warn_unused_result))
+\end{codebox}
+
+在 MSVC 中：\texttt{\_Check\_return\_} —— 详见 MSDN：Annotating Function Behavior\footnote{\url{https://msdn.microsoft.com/en-us/library/jj159529.aspx}}。
+
+\section{小结}
+
+总结一下：\texttt{\texttt{[[nodiscard]]}} 对于所有重要的代码——公共 API、安全关键系统等——都是一个极好的补充。添加这个属性至少能强化代码契约，并且编译器会帮助你在编译期发现 bug，而不是等到运行时才暴露。

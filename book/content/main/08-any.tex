@@ -1,0 +1,457 @@
+使用 \texttt{std::optional} 可以表示“某个类型或无”，使用 \texttt{std::variant} 可以把若干变体打包进同一个实体。而 C++17 还给了我们另一种包装类型：\texttt{std::any}，它能以类型安全的方式容纳任何东西。
+
+本章你将学到：
+\begin{itemize}
+\item 为什么 \texttt{void*} 是一种非常不安全的模式
+\item \texttt{std::any} 及其基本用法
+\item \texttt{std::any} 的使用场景示例
+\item \texttt{any\_cast} 以及如何运用它的所有“模式”
+\end{itemize}
+
+
+\section{基础}
+
+在 C++14 里，要把可变类型放进一个变量中并没有太多选择。你当然可以用 \texttt{void*}，但这并不安全。“\texttt{void*} 只是一个裸指针，你必须自己管理整个对象的生命期，并防止它被转换成别的类型。”
+
+潜在地，\texttt{void*} 可以被包装进一个带有某种类型判别器的类里。
+
+\begin{codebox}[cpp]
+class MyAny
+{
+void* _value;
+TypeInfo _typeInfo;
+};
+\end{codebox}
+
+如你所见，我们拥有某种基础形式的类型，但要保证 MyAny 是类型安全的，还需要写一些代码。正因如此，最好使用标准库，而不是自己造一个实现。
+
+而这正是 C++17 中 \texttt{std::any} 的基本形态。它让你能在对象中存放任何东西，并在你试图访问一个当前未激活的类型时报错（或抛出异常）。
+
+来看一个小例子：
+
+\begin{codebox}[cpp]
+// 第 8 章 Any/any_demo.cpp
+std::any a(12);
+// 设置任意值：
+a = std::string("Hello!");
+a = 16;
+// 读取值：
+// 我们可以把它当作 int 读取
+std::cout << std::any_cast<int>(a) << '\n';
+// 但不能当作 string 读取：
+try
+{
+std::cout << std::any_cast<std::string>(a) << '\n';
+}
+catch(const std::bad_any_cast& e)
+{
+std::cout << e.what() << '\n';
+}
+// 重置并检查是否还持有值：
+a.reset();
+if (!a.has_value())
+{
+std::cout << "a is empty!" << '\n';
+}
+// 你也可以在容器中使用它：
+std::map<std::string, std::any> m;
+m["integer"] = 10;
+m["string"] = std::string("Hello World");
+m["float"] = 1.0f;
+for (auto &[key, val] : m)
+{
+if (val.type() == typeid(int))
+std::cout << "int: " << std::any_cast<int>(val) << '\n';
+else if (val.type() == typeid(std::string))
+std::cout << "string: " << std::any_cast<std::string>(val) << '\n';
+else if (val.type() == typeid(float))
+std::cout << "float: " << std::any_cast<float>(val) << '\n';
+}
+\end{codebox}
+
+程序将输出：
+
+\begin{codebox}[cpp]
+16
+bad any_cast
+a is empty!
+float: 1
+int: 10
+string: Hello World
+\end{codebox}
+
+上面的例子向我们展示了几件事：
+\begin{itemize}
+\item \texttt{std::any} 不像 \texttt{std::optional} 或 \texttt{std::variant} 那样是一个模板类。
+\item 默认情况下它不持有任何值，你可以通过 \texttt{.has\_value()} 来检查。
+\item 你可以通过 \texttt{.reset()} 重置一个 any 对象。
+\item 它作用在“退化”类型上——也就是说，在赋值、初始化或就地构造之前，类型会被 \texttt{std::decay}\footnote{\url{http://en.cppreference.com/w/cpp/types/decay}} 转换。
+\item 当赋入一个不同类型时，原先处于激活状态的类型会被销毁。
+\end{itemize}
+
+\begin{itemize}
+\item 你可以通过 \texttt{std::any\_cast<T>} 来访问值。如果当前激活的类型不是 T，它会抛出 \texttt{bad\_any\_cast}。
+\item 你可以通过 \texttt{.type()} 来发现当前激活的类型，它返回该类型的 \texttt{std::type\_info}\footnote{\url{http://en.cppreference.com/w/cpp/types/type_info}}。
+\end{itemize}
+
+
+\subsection{何时使用}
+
+虽然 \texttt{void*} 可能是一种极其不安全的模式，且仅有有限的适用场景，但 \texttt{std::any} 增加了类型安全性，因此它的用途更广。
+
+一些可能的场景：
+\begin{itemize}
+\item 在库代码中——当某个库类型必须持有或传递任意东西，却不知道可用类型集合时
+\item 解析文件——当你实在无法指定所支持的类型时
+\item 消息传递
+\item 与脚本语言绑定
+\item 为脚本语言实现解释器
+\item 用户界面——控件可能持有任意东西
+\item 编辑器中的实体
+\end{itemize}
+
+在许多情况下，你可以限制所支持类型的数量，因此 \texttt{std::variant} 或许是更好的选择。当然，当你实现一个库却不知道最终的应用场景时，事情就变得棘手了——因为你并不知道对象中将会存储哪些可能的类型。
+
+
+\section{std::any 的创建}
+
+你可以通过几种方式来创建 \texttt{std::any} 对象：
+\begin{itemize}
+\item 默认初始化——此时对象为空
+\item 用一个值/对象直接初始化
+\item 原地 \texttt{std::in\_place\_type}
+\item 通过 \texttt{std::make\_any}
+\end{itemize}
+
+下面的例子可以说明：
+
+\begin{codebox}[cpp]
+// 第 8 章 Any/any_creation.cpp
+// 默认初始化：
+std::any a;
+assert(!a.has_value());
+// 用对象初始化：
+std::any a2{10}; // int
+std::any a3{MyType{10, 11}};
+// 原地构造：
+std::any a4{std::in_place_type<MyType>, 10, 11};
+std::any a5{std::in_place_type<std::string>, "Hello World"};
+// make_any
+std::any a6 = std::make_any<std::string>{"Hello World"};
+\end{codebox}
+
+
+\subsection{原地构造}
+
+沿用 \texttt{std::optional} 和 \texttt{std::variant} 的风格，\texttt{std::any} 也可以使用 \texttt{std::in\_place\_type} 来高效地在原地创建对象。
+
+\mySmallsection{复杂类型}
+
+在下面的例子中，会需要一个临时对象：
+
+\begin{codebox}[cpp]
+std::any a{UserName{"hello"}};
+\end{codebox}
+
+但用下面的方式：
+
+\begin{codebox}[cpp]
+std::any a{std::in_place_type<UserName>, "hello"};
+\end{codebox}
+
+该对象会使用给定的一组参数在原地创建。
+
+\mySmallsection{std::make\_any}
+
+为方便起见，\texttt{std::any} 提供了一个名为 \texttt{std::make\_any} 的工厂函数，它返回
+
+\begin{codebox}[cpp]
+return std::any(std::in_place_type<T>, std::forward<Args>(args)...);
+\end{codebox}
+
+所以在前面的例子中，我们也可以写成：
+
+\begin{codebox}[cpp]
+auto a = std::make_any<UserName>{"hello"};
+\end{codebox}
+
+\texttt{make\_any} 用起来可能更直接。
+
+
+\section{修改存储的值}
+
+当你想修改 \texttt{std::any} 中当前存储的值时，有两种选择：使用 \texttt{emplace} 或赋值：
+
+\begin{codebox}[cpp]
+// 第 8 章 Any/any_changing.cpp
+std::any a;
+a = MyType(10, 11);
+a = std::string("Hello");
+a.emplace<float>(100.5f);
+a.emplace<std::vector<int>>({10, 11, 12, 13});
+a.emplace<MyType>(10, 11);
+\end{codebox}
+
+
+\subsection{对象生命期}
+
+对 \texttt{std::any} 而言，保证安全的关键在于不泄漏任何资源。为了实现这一点，\texttt{std::any} 会在赋新值之前销毁任何处于激活状态的对象。
+
+\begin{codebox}[cpp]
+// 第 8 章 Any/any_lifetime.cpp
+std::any var = std::make_any<MyType>();
+var = 100.0f;
+std::cout << std::any_cast<float>(var) << '\n';
+\end{codebox}
+
+如果我们在构造函数和析构函数里插入打印语句，会得到如下输出：
+
+\begin{codebox}[cpp]
+MyType::MyType
+MyType::~MyType
+\end{codebox}
+
+这个 any 对象是以 MyType 初始化的，但在它获得新值（\texttt{100.0f}）之前，会先调用 MyType 的析构函数。
+
+
+\section{访问存储的值}
+
+要读取 \texttt{std::any} 中当前激活的值，你基本只有一种选择——\texttt{template<class ValueType> ValueType std::any\_cast}。如果所请求的类型确实存在于对象中，这个函数就会返回该类型的值。
+
+不过，这个函数模板相当强大，因为它有“三种模式”：
+\begin{itemize}
+\item 读访问——返回值的副本，失败时抛出 \texttt{std::bad\_any\_cast}
+\item 读/写访问——返回引用，失败时抛出 \texttt{std::bad\_any\_cast}
+\item 读/写访问——返回指向值的指针（\texttt{const} 或非 \texttt{const}），失败时返回 \texttt{nullptr}
+\end{itemize}
+
+请看例子：
+
+\begin{codebox}[cpp]
+// 第 8 章 Any/any_access.cpp
+struct MyType
+{
+int a, b;
+MyType(int x, int y) : a(x), b(y) { }
+void Print() { std::cout << a << ", " << b << '\n'; }
+};
+int main()
+{
+std::any var = std::make_any<MyType>(10, 10);
+try
+{
+std::any_cast<MyType&>(var).Print();
+std::any_cast<MyType&>(var).a = 11; // 读/写
+std::any_cast<MyType&>(var).Print();
+std::any_cast<int>(var); // 抛异常！
+}
+catch(const std::bad_any_cast& e)
+{
+std::cout << e.what() << '\n';
+}
+int* p = std::any_cast<int>(&var);
+std::cout << (p ? "contains int... \n" : "doesn't contain an int...\n");
+if (MyType* pt = std::any_cast<MyType>(&var); pt)
+{
+pt->a = 12;
+std::any_cast<MyType&>(var).Print();
+}
+}
+\end{codebox}
+
+如你所见，错误处理有两种方式：通过异常（\texttt{std::bad\_any\_cast}）或通过返回指针（或 \texttt{nullptr}）。\texttt{std::any\_cast} 的指针访问重载还被标记为 \texttt{noexcept}。
+
+
+\section{性能与内存考量}
+
+\texttt{std::any} 看起来相当强大，你或许会用它来持有不同类型的变量……但你可能会问，这种灵活性要付出什么代价。主要问题在于：额外的动态内存分配。\texttt{std::variant} 和 \texttt{std::optional} 不需要任何额外的内存分配，这是因为它们知道自己会在对象中存储哪种（或哪些）类型。而 \texttt{std::any} 不知道会存储哪些类型，因此可能会用到一些堆内存。
+
+这种情况是总会发生的，还是有时发生？规则是什么？即使像 \texttt{int} 这样简单的类型也会发生吗？
+
+我们来看看标准是怎么说的：
+
+从标准来看：
+
+\begin{myQuote}
+实现应当避免为较小的包含值使用动态分配的内存。例如：当被构造的对象只持有一个 int 时。这种小对象优化应当只应用于那些 \texttt{is\_nothrow\_move\_constructible\_v<T>} 为 true 的类型 T。
+\end{myQuote}
+
+总结一下——实现被鼓励使用 SBO（Small Buffer Optimisation，小缓冲优化）。但这也要付出一定代价：它会让该类型变得更大——以便容纳缓冲区。
+
+我们来检查一下 \texttt{std::any} 的大小：
+
+下面是三个编译器的测试结果：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c}
+\toprule
+编译器 & \texttt{sizeof(any)} \\
+\midrule
+GCC 8.1 (Coliru) & 16 \\
+Clang 7.0.0 (Wandbox) & 32 \\
+MSVC 2017 15.7.0 32-bit & 40 \\
+MSVC 2017 15.7.0 64-bit & 64 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+总的来说，如你所见，\texttt{std::any} 并不是一个“简单”的类型，它会带来不少额外开销。它通常并不小——由于 SBO——它会占用 16 或 32 字节（GCC、Clang，在 MSVC 中甚至达到 64 字节）。你可以在第 8 章的 \texttt{Any/any\_sizeof.cpp} 中看到代码。
+
+
+\section{从 boost::any 迁移}
+
+Boost.Any 大约在 2001 年（版本 1.23.0）引入。有趣的是，Boost 库（指 \texttt{boost::any}）的作者——凯夫林·亨尼（Kevlin Henney）——同时也是 \texttt{std::any} 提案的作者。因此这两种类型联系紧密，标准库版本很大程度上基于其前身。
+
+下面是主要的差异：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c}
+\toprule
+特性 & Boost.Any (1.67.0) & std::any \\
+\midrule
+额外的内存分配 & Yes & Yes \\
+小缓冲优化 & Yes & Yes \\
+emplace & No & Yes \\
+构造时使用 \texttt{in\_place\_type\_t} & No & Yes \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+这两种类型之间的差异并不多。大多数情况下，你可以轻松地把 \texttt{boost::any} 转换为标准库版本。
+
+
+\section{std::any 示例}
+
+\texttt{std::any} 的核心在于灵活性。在下面的例子中，你可以看到一些思路（或具体实现），其中持有可变类型能让应用稍微简单一些。
+
+
+\subsection{解析文件}
+
+在 \texttt{std::variant} 的例子中，你可以看到如何解析配置文件并把结果存为若干类型之一。如果你写一个完全通用的解决方案——例如作为某个库的一部分——那么你可能并不知道所有可能的类型。从性能角度看，把 \texttt{std::any} 作为属性的值来存储或许已经足够好，而且会给你带来灵活性。
+
+
+\subsection{消息传递}
+
+在主要是 C 语言的 Windows API 中，有一种消息传递机制，它使用消息 id 加上两个可选参数来存储消息的值。基于这一机制，你可以实现 \texttt{WndProc} 来处理传递给你的窗口/控件的消息：
+
+\begin{codebox}[cpp]
+LRESULT CALLBACK WindowProc(
+_In_ HWND
+hwnd,
+_In_ UINT
+uMsg,
+_In_ WPARAM wParam,
+_In_ LPARAM lParam
+);
+\end{codebox}
+
+这里的窍门在于，这些值以各种形式存储在 \texttt{wParam} 或 \texttt{lParam} 中。有时你只需用到 \texttt{wParam} 的几个字节……
+
+如果我们把这个系统改造成使用 \texttt{std::any}，让消息可以向处理方法传递任意东西，会怎样？
+
+例如：
+
+\begin{codebox}[cpp]
+class Message
+{
+public:
+enum class Type
+{
+Init,
+Closing,
+ShowWindow,
+DrawWindow
+};
+public:
+explicit Message(Type type, std::any param) :
+mType(type),
+mParam(param)
+{
+}
+explicit Message(Type type) :
+mType(type)
+{
+}
+Type mType;
+std::any mParam;
+};
+\end{codebox}
+
+\begin{codebox}[cpp]
+class Window
+{
+public:
+virtual void HandleMessage(const Message& msg) = 0;
+};
+\end{codebox}
+
+例如，你可以向一个窗口发送消息：
+
+\begin{codebox}[cpp]
+Message m(Message::Type::ShowWindow, std::make_pair(10, 11));
+yourWindow.HandleMessage(m);
+\end{codebox}
+
+然后窗口可以用下面的消息处理器来响应这条消息：
+
+\begin{codebox}[cpp]
+switch (msg.mType) {
+// ...
+case Message::Type::ShowWindow:
+{
+auto pos = std::any_cast<std::pair<int, int>>(msg.mParam);
+std::cout << "ShowWindow: "
+<< pos.first << ", "
+<< pos.second << '\n';
+break;
+}
+}
+\end{codebox}
+
+当然，你必须定义这些值如何指定（消息的值是什么类型），但现在你可以使用真实的类型，而不必再对整数做各种花样。
+
+
+\subsection{属性}
+
+那篇把 any 引入 C++ 的原始提案 N1939\footnote{\url{http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n1939.html}} 展示了一个属性类的例子。
+
+\begin{codebox}[cpp]
+struct property
+{
+property();
+property(const std::string &, const std::any &);
+std::string name;
+std::any value;
+};
+typedef std::vector<property> properties;
+\end{codebox}
+
+这个 \texttt{properties} 对象看起来相当强大，因为它可以持有许多不同的类型。这种结构可以派上用场的一个例子就是游戏编辑器。
+
+
+\section{小结}
+
+关于 \texttt{std::any}，请记住以下几点：
+\begin{itemize}
+\item \texttt{std::any} 不是一个模板类
+\item \texttt{std::any} 使用小缓冲优化（Small Buffer Optimisation），因此对于像 int、double 这样简单的类型，它不会动态分配内存……但对于更大的类型，它会额外使用 \texttt{new}
+\item \texttt{std::any} 可能被认为是“重量级”的，但它提供了极大的灵活性和类型安全性
+\item 你可以通过 \texttt{any\_cast} 访问当前存储的值，它提供了几种“模式”：例如它可能抛出异常，也可能返回 \texttt{nullptr}
+\item 当你不知道可能的类型时使用它——否则请考虑 \texttt{std::variant}
+\end{itemize}
+
+
+\section{编译器支持}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+\texttt{std::any} & 7.1 & 4.0 & VS 2017 15.0 \\
+\bottomrule
+\end{tabularx}
+\end{table}

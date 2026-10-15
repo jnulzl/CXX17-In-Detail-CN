@@ -1,0 +1,562 @@
+在讲解并行算法那一章里，我们学习了如何让代码自动在多个线程上运行来加速。那一章给出了几个较小的示例和基准测试。现在，我们不妨看看更大型的应用，以及它们能从并行化中获得怎样的好处，这也正是本章要展开的内容。
+
+在接下来的几页里，你将看到如何构建一个操作 CSV 文件的工具：它把每行解析成销售记录，然后对这些数据执行计算。你会看到，只需为选定的算法加入并行执行，就能让整个应用的性能得到提升，而且做起来非常容易。最后，我们会讨论在此过程中发现的问题，以及未来可能的增强方向。
+
+本章你将学到：
+\begin{itemize}
+\item 如何构建一个加载 CSV 文件的应用
+\item 如何高效地使用并行算法
+\item 如何使用 \texttt{std::filesystem} 库来收集所需的文件
+\item 如何使用其他 C++17 库特性，例如 \texttt{std::optional}、转换例程 \texttt{std::from\_chars} 以及 \texttt{std::string\_view}
+\end{itemize}
+
+\section{介绍与需求}
+
+设想你正在处理一些销售数据，其中一项任务是计算某些产品订单的总和。你的购物系统很简陋，没有数据库，而是用 CSV 文件来保存订单数据。每种产品对应一个文件。
+
+以图书销售为例：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{l l c c c}
+\toprule
+date & coupon code & price & discount & quantity \\
+\midrule
+5-12-2018 &          & 10.0 & 0    & 2 \\
+5-12-2018 &          & 10.0 & 0    & 1 \\
+6-12-2018 & Santa    & 10.0 & 0.25 & 1 \\
+7-12-2018 &          & 10.0 & 0    & 1 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+每一行表示在某个具体日期发生的一笔图书销售。例如 12 月 5 日共有三笔销售，每笔 10 美元，其中一人买了两本。12 月 6 日有一笔使用了优惠券码的销售。
+
+这些数据被编码为一个 CSV 文件：\texttt{sales/book.csv}：
+
+\begin{codebox}[cpp]
+5-12-2018;;10.0;0;2;
+5-12-2018;;10.0;0;1;
+6-12-2018;Santa;10.0;0.25;1;
+7-12-2018;;10.0;0;1;
+\end{codebox}
+
+应用应当读取这些数据并计算总和，因此在上面的例子中我们有
+
+\begin{codebox}[cpp]
+sum = 10*2+10*1+
+// 12 月 5 日
+10*(1-0.25)*1 +
+// 12 月 6 日，含 25% 优惠券
+10*1;
+// 12 月 7 日
+\end{codebox}
+
+对于上述销售数据，最终总和为 47.5 美元。
+
+下面是我们想要构建的应用的需求：
+\begin{itemize}
+\item 应用加载给定文件夹中的所有 CSV 文件——从命令行第一个参数读取
+\item 文件可能包含数千条记录，但都能装入内存。无需为超大文件提供额外支持
+\item 应用还可以从命令行第二、第三个参数读取起始日期和结束日期（可选）
+\item 每行 CSV 的结构如下：\texttt{date;coupon code;unit price;quantity;discount;}
+\item 应用对给定日期范围内的所有订单求和，并将总和打印到标准输出
+\end{itemize}
+
+我们先实现串行版本，然后再尝试将其并行化。
+
+\section{串行版本}
+
+第一步，我们先来看应用的串行版本。这能帮助你理解系统的核心组成部分，并看清这个工具是如何工作的。代码不太容易在一页内放完，你可以到下面的文件中查看：\texttt{CSV Chapter/csv\_reader.cpp}。在接下来的几节里，我们会逐一探讨应用的核心部分。
+
+\subsection{主函数}
+
+我们先从 \texttt{main()} 函数开始。
+
+\begin{codebox}[cpp]
+int main(int argc, const char** argv) {
+if (argc <= 1)
+return 1;
+try {
+const auto paths = CollectPaths(argv[1]);
+if (paths.empty()) {
+std::cout << "No files to process...\n";
+return 0;
+}
+const auto startDate = argc > 2 ? Date(argv[2]) : Date();
+const auto endDate = argc > 3 ? Date(argv[3]) : Date();
+const auto results = CalcResults(paths, startDate, endDate);
+ShowResults(startDate, endDate, results);
+}
+catch (const std::filesystem::filesystem_error& err) {
+std::cerr << "filesystem error! " << err.what() << '\n';
+}
+catch (const std::runtime_error& err) {
+std::cerr << "runtime error! " << err.what() << '\n';
+}
+return 0;
+}
+\end{codebox}
+
+一旦确认命令行中有足够的参数，我们就进入 \texttt{main} 的作用域，所有处理都在这里发生：
+\begin{itemize}
+\item 第 6 行——收集所有待处理的文件——在 \texttt{CollectPaths()} 中
+\item 第 16 行——将文件中的数据转换为记录数据并计算结果——在 \texttt{CalcResults()} 中
+\item 第 18 行——将结果显示到输出——在 \texttt{ShowResults()} 中
+\end{itemize}
+
+整个应用都依赖异常机制。
+
+文件路径通过 \texttt{std::filesystem} 库中的 \texttt{directory\_iterator} 收集：
+
+\begin{codebox}[cpp]
+bool IsCSVFile(const fs::path &p)
+{
+return fs::is_regular_file(p) && p.extension() == CSV_EXTENSION;
+}
+[[nodiscard]] std::vector<fs::path> CollectPaths(const fs::path& startPath)
+{
+std::vector<fs::path> paths;
+fs::directory_iterator dirpos{ startPath };
+std::copy_if(fs::begin(dirpos), fs::end(dirpos), std::back_inserter(paths),
+IsCSVFile);
+return paths;
+}
+\end{codebox}
+
+与其他 filesystem 示例一样，命名空间 \texttt{fs} 是 \texttt{std::filesystem} 的别名。
+
+借助 \texttt{directory\_iterator}，我们可以轻松遍历给定目录。通过使用 \texttt{copy\_if}，我们能够过滤掉不需要的文件，只保留扩展名为 CSV 的文件。请注意，获取路径的各个组成部分、检查文件属性是多么容易。
+
+回到 \texttt{main()}，我们检查是否有文件需要处理（第 8 行）。
+
+随后，在第 13 和 14 行，我们解析可选的日期：\texttt{startDate} 和 \texttt{endDate} 分别从 \texttt{argv[2]} 和 \texttt{argv[3]} 读取。
+
+日期保存在一个辅助类 \texttt{Date} 中，它允许你从采用「日-月-年」或「年-月-日」简单格式的字符串进行转换。该类还支持日期比较。这将帮助我们判断某笔订单是否落在选定的日期范围内。
+
+现在，所有计算与打印都包含在这几行中：\texttt{const auto results = CalcResults(paths, startDate, endDate);} 以及 \texttt{ShowResults(results, startDate, endDate);}
+
+\texttt{CalcResults()} 实现了应用的核心需求：
+\begin{itemize}
+\item 将文件中的数据转换为待处理的记录列表
+\item 计算给定日期范围内记录的总和
+\end{itemize}
+
+\begin{codebox}[cpp]
+struct Result
+{
+std::string mFilename;
+double mSum{ 0.0 };
+};
+[[nodiscard]] std::vector<Result>
+CalcResults(const std::vector<fs::path>& paths, Date startDate, Date endDate)
+{
+std::vector<Result> results;
+for (const auto& p : paths)
+{
+const auto records = LoadRecords(p);
+const auto totalValue = CalcTotalOrder(records, startDate, endDate);
+results.push_back({ p.string(), totalValue });
+}
+return results;
+}
+\end{codebox}
+
+这段代码从每个 CSV 文件加载记录，然后计算这些记录的总和。结果（连同文件名）被存入输出向量。
+
+现在，我们可以揭晓两个关键方法 \texttt{LoadRecords} 和 \texttt{CalcTotalOrder} 背后的代码。
+
+\subsection{将行转换为记录}
+
+\texttt{LoadRecords} 是一个以文件名为参数的函数，它将文件内容读入 \texttt{std::string}，然后执行转换：
+
+\begin{codebox}[cpp]
+[[nodiscard]] std::vector<OrderRecord> LoadRecords(const fs::path& filename)
+{
+const auto content = GetFileContents(filename);
+const auto lines = SplitLines(content);
+return LinesToRecords(lines);
+}
+\end{codebox}
+
+我们假设文件足够小，能够放入内存，因此无需分块处理。
+
+核心任务是将那个大字符串拆分成行，再将其转换为记录的集合。
+
+查看代码可以看到，\texttt{content} 是 \texttt{std::string}，而 \texttt{lines} 是 \texttt{std::string\_view} 的向量。视图用于优化。我们保证持有那个大字符串——即文件内容——的同时处理它的各个片段（视图）。由于无需拷贝字符串数据，这应当能带来更好的性能。
+
+\subsubsection*{OrderRecord 类}
+
+用于计算结果的主类是 \texttt{OrderRecord}。它直接对应 CSV 文件中的一行。
+
+\begin{codebox}[cpp]
+class OrderRecord
+{
+public:
+// constructors...
+double CalcRecordPrice() const noexcept;
+bool CheckDate(const Date& start, const Date& end) const noexcept;
+private:
+Date mDate;
+std::string mCouponCode;
+double mUnitPrice{ 0.0 };
+double mDiscount{ 0.0 }; // 取值范围 0...1.0
+unsigned int mQuantity{ 0 };
+};
+\end{codebox}
+
+\subsubsection*{转换}
+
+有了行之后，我们就可以将它们逐个转换为对象：
+
+\begin{codebox}[cpp]
+[[nodiscard]] std::vector<OrderRecord>
+LinesToRecords(const std::vector<std::string_view>& lines)
+{
+std::vector<OrderRecord> outRecords;
+std::transform(lines.begin(), lines.end(),
+std::back_inserter(outRecords), LineToRecord);
+return outRecords;
+}
+\end{codebox}
+
+上面的代码只是一个转换，它用 \texttt{LineToRecord} 来完成繁重的工作：
+
+\begin{codebox}[cpp]
+[[nodiscard]] OrderRecord LineToRecord(std::string_view sv)
+{
+const auto cols = SplitString(sv, CSV_DELIM);
+if (cols.size() == static_cast<size_t>(OrderRecord::ENUM_LENGTH))
+{
+const auto unitPrice = TryConvert<double>(cols[OrderRecord::UNIT_PRICE]);
+const auto discount = TryConvert<double>(cols[OrderRecord::DISCOUNT]);
+const auto quantity = TryConvert<unsigned int>(cols[OrderRecord::QUANTITY]);
+if (unitPrice && discount && quantity)
+{
+return { Date(cols[OrderRecord::DATE]),
+std::string(cols[OrderRecord::COUPON]),
+*unitPrice,
+*discount,
+*quantity };
+}
+}
+throw std::runtime_error("Cannot convert Record from " + std::string(sv));
+}
+\end{codebox}
+
+首先，把一行拆分成若干列，然后逐列处理。如果所有元素都转换成功，我们就可以构建一条记录。
+
+对于元素的转换，我们使用一个基于 \texttt{std::from\_chars} 的小工具：
+
+\begin{codebox}[cpp]
+template<typename T>
+[[nodiscard]] std::optional<T> TryConvert(std::string_view sv) noexcept
+{
+T value{ };
+const auto last = sv.data() + sv.size();
+const auto res = std::from_chars(sv.data(), last, value);
+if (res.ec == std::errc{} && res.ptr == last)
+return value;
+return std::nullopt;
+}
+\end{codebox}
+
+\texttt{TryConvert} 使用 \texttt{std::from\_chars}，在没有错误时返回转换后的值。你还记得，为保证所有字符都被解析，我们还必须检查 \texttt{res.ptr == last}。否则，对于像 \texttt{123xxx} 这样的输入，转换也可能返回成功。
+
+\subsection{计算}
+
+一旦所有记录就绪，我们就可以计算它们的总和：
+
+\begin{codebox}[cpp]
+[[nodiscard]] double CalcTotalOrder(const std::vector<OrderRecord>& records,
+const Date& startDate, const Date& endDate)
+{
+return std::accumulate(std::begin(records), std::end(records), 0.0,
+[&startDate, &endDate](double val, const OrderRecord& rec) {
+if (rec.CheckDate(startDate, endDate))
+return val + rec.CalcRecordPrice();
+else
+return val;
+}
+);
+}
+\end{codebox}
+
+这段代码遍历所有记录的向量，如果记录落在 \texttt{startDate} 和 \texttt{endDate} 之间，就计算每条记录的价格。然后全部在 \texttt{std::accumulate} 中求和。
+
+\subsection{设计增强}
+
+这个应用只计算订单的总和，但我们也可以考虑加入其他功能。例如最小值、最大值、平均订单值，以及其他统计量。
+
+代码采用了简单的方式：将文件读入一个字符串，再创建一个临时的行向量。我们也可以通过使用行迭代器来增强这一点。它会接收一个大字符串，并在迭代时返回一行。
+
+另一个想法与错误处理有关。例如，与其抛出异常，我们不妨在转换步骤中记录成功处理的记录数量来增强健壮性。
+
+\subsection{运行代码}
+
+应用已经可以编译，我们可以在引言所示的示例数据上运行它。
+
+\begin{codebox}[cpp]
+CSVReader.exe sales/
+\end{codebox}
+
+这应当读取单个文件 \texttt{sales/book.csv}，并对所有记录求和（因为没有指定日期）：
+
+\begin{codebox}[cpp]
+.\CalcOrdersSerial.exe .\sales\
+Name Of File
+| Total Orders Value
+sales\book.csv
+| 47.50
+CalcResults: 3.13 ms
+CalcTotalOrder: 0.01 ms
+Parsing Strings: 0.01 ms
+\end{codebox}
+
+完整版代码还包含计时测量，因此你会看到整个操作大约耗时 3 毫秒。文件处理耗时最长；计算和解析几乎瞬间完成。
+
+在接下来的几节里，你将看到应用并行算法可以采用的几个简单步骤。
+
+\section{使用并行算法}
+
+之前，代码是以顺序方式执行的。我们可以用下面的示意图来说明：
+
+\myGraphic{0.9}{images/fig\_p304\_1.png}{CSV 读取器的串行执行}
+
+我们打开每个文件，处理它，进行计算，然后转到下一个文件。这一切都发生在单个线程上。
+
+不过，有几处可以考虑使用并行算法：
+\begin{itemize}
+\item 每个文件可以单独处理
+\item 文件的每一行可以独立转换为记录数据
+\item 计算可以通过并行执行来增强
+\end{itemize}
+
+如果我们聚焦于第二和第三个选项，就可以转向如下执行模型：
+
+\myGraphic{0.9}{images/fig\_p305\_1.png}{CSV 读取器的并行执行}
+
+上图显示我们仍在逐个处理文件，但在解析字符串和进行计算时使用了并行执行。
+
+在进行转换时，必须记住：异常不会从我们的代码中重新抛出，只会调用 \texttt{std::terminate}。
+
+截至 2018 年 12 月，只有 MSVC 编译器在标准库中支持并行执行。本例的并行版本无法在 GCC 或 Clang 上工作。不过，可以使用第三方库，例如 Intel Parallel STL 或 HPX。你仍然可以编译串行版本（\texttt{csv\_reader.cpp}）并动手试验这段代码。它在 GCC 8.2 上通过了测试，但在 Clang 下编译失败。
+
+\subsection{数据规模与指令数量很重要}
+
+如何用并行算法获得最佳性能？你需要两样东西：
+\begin{itemize}
+\item 大量待处理的数据
+\item 能让 CPU 忙起来的指令
+\end{itemize}
+
+我们还必须记住一条规则：\textbf{一般而言，并行算法会做更多工作}，因为它们引入了管理并行执行框架、以及把任务拆分成更小批次的额外开销。
+
+首先，也是最重要的，我们必须考虑所操作数据的规模。如果只有几个文件、每个文件几十条记录，那么并行执行可能毫无收益。但如果文件很多、每个文件数百行，潜力就会提升。第二点是指令数量。CPU 核心需要计算，而不只是等待内存。如果你的算法是内存受限的，那么并行执行相比顺序版本可能没有任何加速。在我们的例子中，字符串解析任务似乎很合适：代码在字符串上执行搜索并进行数值转换，这能让 CPU 保持忙碌。
+
+\subsection{并行数据转换}
+
+如前所述，我们可以为转换数据的部分加入并行执行。我们有大量行要解析，而且每次解析都是独立的。
+
+\begin{codebox}[cpp]
+[[nodiscard]] std::vector<OrderRecord>
+LinesToRecords(const std::vector<std::string_view>& lines)
+{
+std::vector<OrderRecord> outRecords(lines.size());
+std::transform(std::execution::par, std::begin(lines), std::end(lines),
+std::begin(outRecords), LineToRecord);
+return outRecords;
+}
+\end{codebox}
+
+相比串行版本，需要改动两处：
+\begin{itemize}
+\item 需要预分配向量
+\item 必须把 \texttt{std::execution::par}（或 \texttt{par\_unseq}）作为第一个参数传入
+\end{itemize}
+
+串行代码同样使用了 \texttt{std::transform}，那为什么不能直接传入执行策略参数呢？我们甚至可以编译通过……但你应当会看到类似这样的错误：\texttt{Parallel algorithms require forward iterators or stronger}。原因很简单：\texttt{std::back\_inserter} 很方便，但它不是前向迭代器。它会把元素插入向量，从而导致向量被多个线程修改（重新分配）。所有插入操作都必须由某个临界区保护，因此整体性能可能会很差。
+
+由于需要预分配向量，我们必须考虑两点：
+\begin{itemize}
+\item 我们为向量内部对象的默认构造付出了代价，当对象相对较小、创建较快时，这通常不是什么大问题。
+\item 另一方面，向量只分配一次，无需像 \texttt{std::back\_inserter} 那样再去增长它（拷贝、重新分配）。
+\end{itemize}
+
+\subsection{并行计算}
+
+另一个可以使用并行算法的地方是 \texttt{CalcTotalOrder()}。
+
+我们可以用 \texttt{std::transform\_reduce} 取代 \texttt{std::accumulate}。
+
+正如并行算法一章所述，浮点求和运算不满足结合律。不过在我们的例子中，结果应当足够稳定，能提供两位小数的精度。如果你需要更高的精度和数值稳定性，最好改用其他方法。
+
+\begin{codebox}[cpp]
+double CalcTotalOrder(const std::vector<OrderRecord>& records,
+const Date& startDate, const Date& endDate)
+{
+return std::transform_reduce(
+std::execution::par,
+std::begin(records), std::end(records),
+0.0,
+std::plus<>(),
+[&startDate, &endDate](const OrderRecord& rec) {
+if (rec.CheckDate(startDate, endDate))
+return rec.CalcRecordPrice();
+return 0.0;
+}
+);
+}
+\end{codebox}
+
+我们利用 \texttt{std::transform\_reduce} 的 transform 步骤来「提取」待求和的值。我们不容易直接使用 \texttt{std::reduce}，因为那需要编写一个针对两个 \texttt{OrderRecord} 对象的归约操作。
+
+\subsection{测试}
+
+我们可以在一组文件上运行两个版本，比较这些改动是否带来了性能上的提升。
+
+我们的应用会访问文件，因此很难做出精确的基准测试，因为我们很快就会落入文件系统缓存。在大规模运行应用之前，会运行一个名为 SysInternal 的 \texttt{RAMMap} 应用程序\footnote{\url{http://technet.microsoft.com/en-us/sysinternals/ff700229.aspx}} 来把文件从缓存中清除。硬盘硬件缓存也很难释放，除非重启系统。应用在 6 核/12 线程的机器上运行——i7 8700，配备高速 SSD 硬盘，Windows 10 系统。
+
+\textbf{中等规模文件：10 个文件，每个 1k 行}
+
+先从 10 个文件、每个 1k 行开始。文件不在操作系统缓存中：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c}
+\toprule
+步骤 & 串行（ms） & 并行（ms） \\
+\midrule
+所有步骤 & 74.05 & 68.391 \\
+\texttt{CalcTotalOrder} & 0.02 & 0.22 \\
+\texttt{Parsing Strings} & 7.85 & 2.82 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+文件位于系统缓存中时：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c}
+\toprule
+步骤 & 串行（ms） & 并行（ms） \\
+\midrule
+所有步骤 & 8.59 & 4.01 \\
+\texttt{CalcTotalOrder} & 0.02 & 0.23 \\
+\texttt{Parsing Strings} & 7.74 & 2.73 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+最初的数字——74 毫秒和 68 毫秒——来自读取未缓存的文件，而接下来的两次运行没有清空系统缓存，因此你可以观察到系统缓存带来的加速幅度。并行版本仍然顺序读取文件，所以我们只获得了几毫秒的改善。字符串解析（分行并转换为记录）现在快了将近 3 倍。求和计算并没有变好，因为单线程版本似乎能更高效地处理求和。
+
+\textbf{大集合：10 个文件，每个 10k 行}
+
+更大的输入会怎样？
+
+未缓存文件：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c}
+\toprule
+步骤 & 串行（ms） & 并行（ms） \\
+\midrule
+所有步骤 & 239.96 & 178.32 \\
+\texttt{CalcTotalOrder} & 0.2 & 0.74 \\
+\texttt{Parsing Strings} & 70.46 & 15.39 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+已缓存：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c}
+\toprule
+步骤 & 串行（ms） & 并行（ms） \\
+\midrule
+所有步骤 & 72.43 & 18.51 \\
+\texttt{CalcTotalOrder} & 0.33 & 0.67 \\
+\texttt{Parsing Strings} & 70.46 & 15.56 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+我们处理的数据越多，结果就越好。加载未缓存文件的成本慢慢「隐藏」在处理记录所耗费的时间之后。在 10k 行的情况下，我们同样可以看到字符串解析步骤快了 3.5 倍；不过计算仍然更慢。
+
+\textbf{最大集合：10 个文件，每个 100k 行}
+
+我们再对最大的文件做一次测试：
+
+未缓存文件：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c}
+\toprule
+步骤 & 串行（ms） & 并行（ms） \\
+\midrule
+所有步骤 & 757.07 & 206.85 \\
+\texttt{CalcTotalOrder} & 3.03 & 2,47 \\
+\texttt{Parsing Strings} & 699.54 & 143.31 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+已缓存：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c}
+\toprule
+步骤 & 串行（ms） & 并行（ms） \\
+\midrule
+所有步骤 & 729.94 & 162.49 \\
+\texttt{CalcTotalOrder} & 3.05 & 2.16 \\
+\texttt{Parsing Strings} & 707.34 & 141.28 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+对于大文件（每个约 2 MB），并行版本明显占优。
+
+\section{总结与讨论}
+
+本章的主要目的，是展示使用并行算法有多么容易。
+
+最终代码位于两个文件中：\texttt{Chapter CSV Reader/csv\_reader.cpp} 以及并行版本 \texttt{Chapter CSV Reader/csv\_reader\_par.cpp}。
+
+在大多数情况下，加入并行执行所需做的全部工作，就是确保任务之间不需要同步，并且在可能时提供前向迭代器。这就是为什么在转换时，我们有时需要预分配 \texttt{std::vector}（或其他兼容的集合），而不是使用 \texttt{std::back\_inserter}。另一个例子是：我们无法并行地遍历目录，因为 \texttt{std::filesystem::directory\_iterator} 不是前向迭代器。
+
+接下来是选择合适的并行算法。在本例中，我们用 \texttt{std::transform\_reduce} 取代了 \texttt{std::accumulate} 来进行计算。字符串解析不需要改动 \texttt{std::transform}——你只需使用额外的执行策略参数即可。
+
+我们的应用比串行版本稍好一些。下面是一些我们可以得出的思考：
+\begin{itemize}
+\item 并行执行要求任务是独立的。如果任务彼此依赖，性能可能反而低于串行版本！这是因为多了额外的同步步骤。
+\item 任务不能是内存受限的，否则 CPU 会等待内存。例如，字符串解析代码在并行时表现更好，因为它有大量指令要执行：字符串搜索、字符串转换。
+\item 你需要大量数据才能看到性能提升。在我们的例子中，每个文件需要数千行才能体现出相对顺序版本的优势。
+\item 求和计算没有显示出多少改善，在较小输入下性能甚至更差。这是因为 \texttt{std::reduce} 算法需要额外的归约步骤，而且我们的计算很简单。如果代码中有更多统计计算，性能或许能提升。
+\item 串行版本的代码直截了当，仍有可以榨取额外性能之处。例如，我们可以减少额外的拷贝和临时向量。在串行版本中使用带顺序执行的 \texttt{std::transform\_reduce} 或许也不错，因为它可能比 \texttt{std::accumulate} 更快。你可以考虑先优化串行版本，再将其并行化。
+\item 如果你依赖异常，那么可能需要为 \texttt{std::terminate} 实现一个处理函数，因为在使用执行策略调用的代码中，异常不会被重新抛出。
+\end{itemize}
+
+综上，本次实验可总结如下：并行算法能为应用带来额外的速度，但必须明智地使用。它们引入了并行执行框架的额外开销，因此拥有大量相互独立、适合并行化的任务至关重要。一如既往，在版本之间测量性能很重要，这样我们才能有信心地选定最终方案。
+
+\subsection{额外的修改与选项}
+
+并行版本的代码略过了一个选项：对文件的并行访问。到目前为止，我们是一个接一个地读取文件，那么在独立线程中读取不同的文件又会怎样？
+
+下面这张示意图说明了这一选项：
+
+\myGraphic{0.9}{images/fig\_p311\_1.png}{CSV 读取器的并行执行：在独立线程中读取文件}
+
+在上图中，情况有些复杂。如果我们假设操作系统无法处理多次文件访问，那么线程会等待文件。但一旦文件就绪，处理就可以并行进行。
+
+如果你想尝试这一技术，可以把 \texttt{CalcResults()} 中的 \texttt{std::execution::seq} 替换为 \texttt{std::execution::par}。这样编译器就能并行运行 \texttt{LoadRecords()} 和 \texttt{CalcTotalOrder()}。
+
+你的系统能否从独立线程访问文件？
+
+一般而言，答案可能很微妙，因为这取决于许多因素：硬件、系统、计算开销等。例如，在配备高速 SSD 的机器上，系统可以处理多次文件读取；而在 HDD 硬盘上，性能可能更慢。现代硬盘还使用原生命令队列（Native Command Queues），因此即使你从多个线程访问，发往硬盘的命令也会是串行的，并且被重新排布成更优的方式。我们把这些实验留给读者，因为这一话题超出了本书的范围。

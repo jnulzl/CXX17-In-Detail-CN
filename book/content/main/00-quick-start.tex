@@ -1,0 +1,89 @@
+\section{快速开始}
+
+为了让您对新标准更有兴趣，下面给出几个代码示例，展示组合使用的语言特性。
+
+如果您觉得这些示例过于复杂，因为它们一次性混合了太多新东西，请不要担心。所有新特性都会在后续章节中逐一深入讲解。
+
+\subsection{使用映射}
+
+\begin{codebox}[cpp]
+// 示例：Part I/demo_map.cpp
+#include <iostream>
+#include <map>
+int main() {
+std::map<std::string, int> mapUsersAge { { "Alex", 45 }, { "John", 25 } };
+std::map mapCopy{mapUsersAge};
+if (auto [iter, wasAdded] = mapCopy.insert_or_assign("John", 26); !wasAdded)
+std::cout << iter->first << " reassigned...\n";
+for (const auto& [key, value] : mapCopy)
+std::cout << key << ", " << value << '\n';
+}
+\end{codebox}
+
+程序将输出：
+
+\begin{codebox}[cpp]
+John reassigned...
+Alex, 45
+John, 26
+\end{codebox}
+
+上面的示例使用了以下特性：
+
+\begin{itemize}
+\item 第 8 行：类模板实参推导（CTAD）——mapCopy 的类型由 \texttt{mapUsersAge} 的类型推导而来，无需再声明 \texttt{std::map<std::string, int> mapCopy\{\dots\}}。
+\item 第 10 行：映射的新插入方法——\texttt{insert\_or\_assign}。
+\item 第 10 行：结构化绑定——将 \texttt{insert\_or\_assign} 返回的 pair 捕获到独立的命名中。
+\item 第 10 行：if 语句的初始化器——iter 和 wasAdded 仅在包围它的 if 语句作用域内可见。
+\item 第 13 行：基于范围的 for 循环中的结构化绑定——我们可以直接用 key 和 value 迭代，而不必用 \texttt{pair.first} 和 \texttt{pair.second}。
+\end{itemize}
+
+\subsection{调试打印}
+
+\begin{codebox}[cpp]
+// 示例：Part I/demo_print.cpp
+#include <iostream>
+template<typename T> void linePrinter(const T& x)
+{
+if constexpr (std::is_integral_v<T>)
+std::cout << "num: " << x << '\n';
+else if constexpr (std::is_floating_point_v<T>) {
+const auto frac = x - static_cast<long>(x);
+std::cout << "flt: " << x << ", frac " << frac << '\n';
+}
+else if constexpr(std::is_pointer_v<T>) {
+std::cout << "ptr, ";
+linePrinter(*x);
+}
+else
+std::cout << x << '\n';
+}
+template<typename ... Args> void printWithInfo(Args ... args) {
+(linePrinter(args), ...); // 对逗号运算符的折叠表达式
+}
+int main () {
+int i = 10;
+float f = 2.56f;
+printWithInfo(&i, &f, 30);
+}
+\end{codebox}
+
+程序将输出：
+
+\begin{codebox}[cpp]
+ptr, num: 10
+ptr, flt: 2.56, frac 0.56
+num: 30
+\end{codebox}
+
+在这里您可以看到以下特性：
+
+\begin{itemize}
+\item 第 5、7、11 行：if constexpr——在编译期舍弃代码，用于匹配模板参数。
+\item 第 5、7、11 行：类型特征的 \texttt{\_v} 变量模板——无需再写 \texttt{std::trait\_name<T>::value}。
+\item 第 20 行：\texttt{printWithInfo} 中的折叠表达式。该特性简化了可变参数模板。在示例中，我们对所有输入参数调用 \texttt{linePrinter()}。
+\end{itemize}
+
+\subsection{开始吧！}
+
+到目前为止您看到的代码只是冰山一角！请阅读后续章节，了解更多内容：语言层面的修复、澄清、被移除的东西（如 \texttt{auto\_ptr}），当然还有新特性：constexpr lambda、if constexpr、折叠表达式、结构化绑定、\texttt{template<auto>}、内联变量、类模板实参推导（CTAD），以及更多！

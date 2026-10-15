@@ -1,0 +1,45 @@
+% book/index.tex —— 封面、目录与全书章节索引
+% 调整章节顺序：直接移动下面的行即可
+
+\myFrontNoToc{content/front/00-title}
+
+\newpage
+\thispagestyle{empty}
+\tableofcontents
+\newpage
+
+\myFront{关于作者}{content/front/01-about-author}
+\myFront{技术审校}{content/front/02-tech-reviewer}
+\myFront{其他评审与支持者}{content/front/03-reviewers}
+\myFront{修订历史}{content/front/04-rev-history}
+\myFront{前言}{content/front/05-preface}
+\myFront{关于本书}{content/front/06-about-book}
+
+\myPart{1}{语言特性}{content/main/part1}
+\myFront{快速开始}{content/main/00-quick-start}
+\myChapter{1}{修复与弃用}{content/main/01-fixes-deprecation}
+\myChapter{2}{语言澄清}{content/main/02-language-clarification}
+\myChapter{3}{通用语言特性}{content/main/03-general-language-features}
+\myChapter{4}{模板}{content/main/04-templates}
+\myChapter{5}{标准属性}{content/main/05-standard-attributes}
+
+\myPart{2}{标准库的变化}{content/main/part2}
+\myChapter{6}{std::optional}{content/main/06-optional}
+\myChapter{7}{std::variant}{content/main/07-variant}
+\myChapter{8}{std::any}{content/main/08-any}
+\myChapter{9}{std::string\_view}{content/main/09-string-view}
+\myChapter{10}{字符串转换}{content/main/10-string-conversions}
+\myChapter{11}{搜索器与字符串匹配}{content/main/11-searchers}
+\myChapter{12}{文件系统}{content/main/12-filesystem}
+\myChapter{13}{并行 STL 算法}{content/main/13-parallel-stl}
+\myChapter{14}{标准库中的其它变化}{content/main/14-other-lib-changes}
+
+\myPart{3}{更多示例与用例}{content/main/part3}
+\myChapter{15}{用 std::optional 与 std::variant 重构}{content/main/15-refactoring}
+\myChapter{16}{用 [[nodiscard]] 强化代码契约}{content/main/16-nodiscard}
+\myChapter{17}{用 if constexpr 替换 enable\_if}{content/main/17-enable-if}
+\myChapter{18}{如何并行化 CSV 读取器}{content/main/18-csv}
+
+\appendix
+\myAppendix{1}{编译器支持}{content/appendix/01-compiler-support}
+\myAppendix{2}{资源与参考文献}{content/appendix/02-resources}

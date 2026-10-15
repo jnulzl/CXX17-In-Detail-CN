@@ -1,0 +1,396 @@
+C++ 是一门难以学习和完全掌握的语言，某些部分可能会让程序员感到困惑。造成这种不清晰的原因之一，在于实现/编译器拥有很大的自由裁量空间。例如，为了允许更激进的优化，或为了满足向后（乃至与 C）兼容的要求。C++17 重新审视了其中一些最常被提及的“漏洞”，并着手加以解决。
+
+在本章中你将学到：
+
+\begin{itemize}
+\item 什么是求值顺序，以及它为何可能产生出乎意料的结果。
+\item 拷贝消除（一种可选的优化，几乎所有主流编译器都实现了它）。
+\item 作为函数声明一部分的异常说明。
+\item 为（过度）对齐数据分配内存。
+\end{itemize}
+
+\section{更严格的表达式求值顺序}
+
+在 C++17 之前，语言一直没有为函数参数的求值规定任何顺序。仅此而已。例如，正因如此，在 C++14 中 \texttt{make\_unique} 不只是一种语法糖，它还能保证内存安全：
+
+我们来看下面的例子：
+
+\texttt{foo(make\_unique<T>(), otherFunction());}
+
+而使用显式的 \texttt{new}：
+
+\texttt{foo(unique\_ptr<T>(new T), otherFunction());}
+
+在 C++14 中，对于上述代码，我们只知道 \texttt{new T} 一定会发生在 \texttt{unique\_ptr} 构造之前，仅此而已。例如，可能先执行 \texttt{new T}，然后执行 \texttt{otherFunction()}，最后才是 \texttt{unique\_ptr} 的构造函数。
+
+当 \texttt{otherFunction()} 抛出异常时，\texttt{new T} 就会产生内存泄漏（因为此时 unique 指针尚未创建）。而当你使用 \texttt{make\_unique} 时，即便执行顺序未知，也绝不可能发生泄漏。
+
+C++17 解决了这个问题，如今实参的求值顺序变得“实用”且可预测。
+
+\subsection{示例}
+
+在表达式 \texttt{f(a, b, c);} 中，\texttt{a}、\texttt{b}、\texttt{c} 的求值顺序仍然未指定，但任何一个实参都必须在其后一个实参开始之前被完整求值。这一点对于如下这种复杂表达式尤为关键：\texttt{f(a(x), b, c(y));}。当编译器选择先求值第一个实参 \texttt{a(x)} 时，它也必须先求值 \texttt{x}，然后才能处理 \texttt{b} 或 \texttt{c(y)}。
+
+这修复了 \texttt{make\_unique} 与 \texttt{unique\_ptr<T>(new T())} 之间的一个问题——因为函数实参必须在其他实参开始之前被完整求值。
+
+考虑下面的情况：
+
+\begin{codebox}[cpp]
+#include <iostream>
+
+class Query
+{
+public:
+    Query& addInt(int i)
+    {
+        std::cout << "addInt: " << i << '\n';
+        return *this;
+    }
+
+    Query& addFloat(float f)
+    {
+        std::cout << "addFloat: " << f << '\n';
+        return *this;
+    }
+};
+
+float computeFloat()
+{
+    std::cout << "computing float... \n";
+    return 10.1f;
+}
+
+float computeInt()
+{
+    std::cout << "computing int... \n";
+    return 8;
+}
+
+int main()
+{
+    Query q;
+    q.addFloat(computeFloat()).addInt(computeInt());
+}
+\end{codebox}
+
+你大概会以为，在 C++14 下 \texttt{computeInt()} 会在 \texttt{addFloat} 之后执行。遗憾的是，事实未必如此。例如，下面是 GCC 4.7.3 的输出：
+
+\begin{codebox}
+computing int...
+computing float...
+addFloat: 10.1
+addInt: 8
+\end{codebox}
+
+函数链式调用已经明确规定按从左到右的顺序执行，但内部表达式的求值顺序可能与此不同。准确地说：这些表达式彼此之间是“不确定顺序（indeterminately sequenced）”的。
+
+如今，在 C++17 中，当函数链式调用包含内部表达式时，它们会按预期工作，即从左右向右求值：在表达式 \texttt{a(expA).b(expB).c(expC)} 中，\texttt{expA} 会在调用 \texttt{b} 之前被求值。
+
+上述例子用符合标准的 C++17 编译器编译后，会得到如下结果：
+
+\begin{codebox}
+computing float...
+addFloat: 10.1
+computing int...
+addInt: 8
+\end{codebox}
+
+这一变更的又一个结果是：当使用运算符重载时，求值顺序由对应的内建运算符所关联的顺序决定。正因如此，\texttt{std::cout << a() << b() << c()} 会按 \texttt{a}、\texttt{b}、\texttt{c} 的顺序求值。在 C++17 之前，它的顺序可能是任意的。
+
+下面是标准里描述的更多规则：下列表达式都按先 \texttt{a}、后 \texttt{b} 的顺序求值：
+
+\begin{enumerate}
+\item \texttt{a.b}
+\item \texttt{a->b}
+\item \texttt{a->*b}
+\item \texttt{a(b1, b2, b3)} // b1、b2、b3 —— 任意顺序
+\item \texttt{b @= a} // “@” 表示任意运算符
+\item \texttt{a[b]}
+\item \texttt{a << b}
+\item \texttt{a >> b}
+\end{enumerate}
+
+如果你不确定自己的代码会如何被求值，那么最好把它写简单些，拆成几条清晰的语句。例如，你可以在 C++ Core 指南中找到一些指南，如 ES.44\footnote{\url{http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines\#Res-order}} 与 ES.44\footnote{\url{http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines\#es44-dont-depend-on-order-of-evaluation-of-function-arguments}}。
+
+\begin{myInfoBox}
+该变更由 P0145R3\footnote{\url{https://wg21.link/p0145r3}} 提出。
+\end{myInfoBox}
+
+\section{保证的拷贝消除}
+
+拷贝消除（Copy Elision）是一种广为人知的优化，它避免创建不必要的临时对象。例如：
+
+\begin{codebox}[cpp]
+// Chapter Clarification/copy_elision.cpp
+#include <iostream>
+
+struct Test
+{
+    Test() { std::cout << "Test::Test\n"; }
+    Test(const Test&) { std::cout << "Test(const Test&)\n"; }
+    Test(Test&&) { std::cout << "Test(Test&&)\n"; }
+    ~Test() { std::cout << "~Test\n"; }
+};
+
+Test Create()
+{
+    return Test();
+}
+
+int main()
+{
+    auto n = Create();
+}
+\end{codebox}
+
+对上述调用，你可能会以为用到了一个临时拷贝来保存 \texttt{Create} 的返回值。在 C++14 中，大多数编译器都能看出这个临时对象可以轻松被优化掉，于是它们可以直接从 \texttt{Create()} 的调用中“就地”构造出 \texttt{n}。因此你大概会看到如下输出：
+
+\begin{codebox}
+Test::Test // create n
+~Test // destroy n when main finishes
+\end{codebox}
+
+这种优化的最基本形式被称为返回值优化（Return Value Optimisation，RVO）。
+
+作为实验，在 GCC 中你可以加上编译器选项 \texttt{-fno-elide-constructors} 并使用 \texttt{-std=c++14}（或更早的语言标准）。这种情况下你会看到不同的输出：
+
+\begin{codebox}
+// compiled as "g++ CopyElision.cpp -std=c++14 -fno-elide-constructors"
+Test::Test
+Test(Test&&)
+~Test
+Test(Test&&)
+~Test
+~Test
+\end{codebox}
+
+这种情况下，编译器为了把返回值传入 \texttt{n} 而多做了两次拷贝；编译器甚至更聪明，当你返回一个具名对象时它也能消除拷贝——这被称为具名返回值优化（Named Return Value Optimisation，NRVO）：
+
+\begin{codebox}[cpp]
+Test Create()
+{
+    Test t;
+    // 若干用于初始化 't' 的指令……
+    return t;
+}
+
+auto n = Create(); // 临时对象通常会被消除
+\end{codebox}
+
+目前，标准允许在以下情形中消除拷贝：
+
+\begin{itemize}
+\item 当一个临时对象被用来初始化另一个对象时（包括函数返回的对象，或由 throw 表达式创建的异常对象）。
+\item 当一个即将离开作用域的变量被返回或抛出时。
+\item 当一个异常按值被捕获时。
+\end{itemize}
+
+然而，是否消除拷贝完全取决于编译器/实现。在实践中，所有构造函数都必须有定义。有时消除只发生在 Release（优化）构建中，而 Debug（无任何优化）构建不会消除任何拷贝。
+
+在 C++17 中，我们获得了关于何时“必须”发生消除的明确规则，因此构造函数可能会被完全省略。
+
+这为什么有用呢？
+
+\begin{itemize}
+\item 允许返回既不可移动也不可拷贝的对象——因为现在我们可以跳过拷贝/移动构造函数。
+\item 提升代码的可移植性——因为每个符合标准的编译器都支持相同的规则。
+\item 支持“按值返回”模式，而非使用输出参数。
+\item 提升性能。
+\end{itemize}
+
+下面你可以看到一个不可移动/不可拷贝类型的例子：
+
+\begin{codebox}[cpp]
+// Chapter Clarification/copy_elision_non_moveable.cpp
+#include <array>
+// based on P0135R0
+
+struct NonMoveable
+{
+    NonMoveable(int x) : v(x) { }
+    NonMoveable(const NonMoveable&) = delete;
+    NonMoveable(NonMoveable&&) = delete;
+    std::array<int, 1024> arr;
+    int v;
+};
+
+NonMoveable make(int val)
+{
+    if (val > 0)
+        return NonMoveable(val);
+    return NonMoveable(-val);
+}
+
+int main()
+{
+    auto largeNonMoveableObj = make(90); // 构造该对象
+    return largeNonMoveableObj.v;
+}
+\end{codebox}
+
+上述代码在 C++14 下无法编译，因为它缺少拷贝和移动构造函数。但在 C++17 中，这些构造函数不再是必需的——因为对象 \texttt{largeNonMoveableObj} 会被就地构造。
+
+请注意，你还可以在一个函数里使用多条 \texttt{return} 语句，拷贝消除依然会生效。
+
+此外，重要的是要记住，在 C++17 中，拷贝消除只对临时对象有效，对具名返回值优化（Named RVO）则无效。
+
+但是，强制性的拷贝消除在标准里是如何定义的呢？这一机制建立在值类别（value categories）之上，所以请继续阅读下一节来理解它的工作原理。
+
+\subsection{更新的值类别}
+
+在 C++98/03 中，表达式只有两个基本类别：
+
+\begin{itemize}
+\item lvalue
+\item rvalue
+\end{itemize}
+
+自 C++11 起，这一分类得到了扩展（由于引入了移动语义），如今我们有五个类别：
+
+\begin{itemize}
+\item lvalue
+\item glvalue
+\item xvalue
+\item rvalue
+\item prvalue
+\end{itemize}
+
+下面的示意图能让你更清楚地了解这些类别：
+
+\myGraphic{0.9}{images/fig\_p41\_1.png}{值类别（Value Categories）}
+
+请记住，我们有三个核心类别（下面给出通俗的“定义”）：
+
+\begin{itemize}
+\item lvalue —— 拥有身份（identity）、且我们可以对其取地址的表达式。
+\item xvalue —— “eXpiring lvalue”（将亡值）—— 我们可以从中移动、可以复用的对象，通常它的生命期即将结束。
+\item prvalue —— 纯右值（pure rvalue）—— 没有名字、无法对其取地址的东西，我们可以从这种表达式移动。
+\end{itemize}
+
+为了在标准层面支持拷贝消除，该提案的作者建议对 glvalue 和 prvalue 做简化：
+
+\begin{itemize}
+\item glvalue —— “generalised”（泛化）lvalue：glvalue 是这样一种表达式，对其求值会计算出某个对象、位域或函数的位置。
+\item prvalue —— “pure”（纯）rvalue：prvalue 是这样一种表达式，对其求值会按照它所处的上下文，初始化某个对象、位域或运算符的操作数。
+\end{itemize}
+
+例如：
+
+\begin{codebox}[cpp]
+class X { int a; };
+X{10}
+// 这个表达式是 prvalue
+X x;
+// x 是 lvalue
+x.a
+// 它是 lvalue（位置）
+\end{codebox}
+
+简而言之：prvalue 执行初始化，glvalue 描述位置。
+
+C++17 标准规定，当存在某个类或数组的 prvalue 时，无需创建任何临时拷贝，从该 prvalue 出发的初始化可以直接发生。其中不涉及移动或拷贝（因此也就不需要拷贝和移动构造函数）；编译器可以安全地执行消除。
+
+它会在以下情形发生：
+
+\begin{itemize}
+\item 在从一个 prvalue 初始化对象时：\texttt{Type t = T()}。
+\item 在函数调用中，当函数返回一个 prvalue 时——就像我们前面的例子那样。
+\end{itemize}
+
+也有一些例外情形，此时临时对象仍是必需的：
+
+\begin{itemize}
+\item 当 prvalue 绑定到引用时。
+\item 当对类类型的 prvalue 执行成员访问时。
+\item 当对数组类型的 prvalue 执行下标访问时。
+\item 当数组类型的 prvalue 退化为指针时。
+\item 当对类类型的 prvalue 执行派生类到基类的转换时。
+\item 当 prvalue 被用作弃值表达式时。
+\end{itemize}
+
+\begin{myInfoBox}
+该变更由 P0135R0\footnote{\url{https://wg21.link/p0135r0}}（理由）与 P0135R1\footnote{\url{https://wg21.link/p0135r1}}（措辞）提出。
+\end{myInfoBox}
+
+\section{为过度对齐数据动态分配内存}
+
+当你使用 SIMD（单指令多数据流）或出于其它内存布局需求时，可能需要对对象做特定的对齐。例如，在 SSE（Streaming SIMD Extensions，流式 SIMD 扩展）中，你需要 16 字节对齐（而 AVX 256 要求 32 字节对齐）。你可以像下面这样定义一个 \texttt{vec4}：
+
+\begin{codebox}[cpp]
+class alignas(16) vec4
+{
+    float x, y, z, w;
+};
+
+auto pVectors = new vec4[1000];
+\end{codebox}
+
+注意：\texttt{alignas} 说明符\footnote{\url{http://en.cppreference.com/w/cpp/language/alignas}} 自 C++11 起可用。
+
+然而，在 C++11/14 中，你无法保证内存会被如何对齐。为了确实保住对齐，你常常得使用 \texttt{\_aligned\_malloc}/\texttt{\_aligned\_free} 这类特殊例程。这并不理想，因为它无法与 C++ 智能指针配合使用，还会让内存管理在代码中暴露出来\footnote{根据 Core 指南，我们应当停止在代码中显式使用裸的 \texttt{new} 和 \texttt{delete}。}。
+
+C++17 通过引入使用对齐参数的额外内存分配函数，填补了这一漏洞：
+
+\begin{codebox}[cpp]
+void* operator new(size_t, align_val_t);
+void* operator new[](size_t, align_val_t);
+void operator delete(void*, align_val_t);
+void operator delete[](void*, align_val_t);
+void operator delete(void*, size_t, align_val_t);
+void operator delete[](void*, size_t, align_val_t);
+\end{codebox}
+
+如今，你可以这样分配那个 \texttt{vec4} 数组：
+
+\texttt{auto pVectors = new vec4[1000];}
+
+代码无需改动，但如今 \texttt{vec4} 的对齐得到了妥善处理：
+
+\texttt{operator new[](sizeof(vec4), align\_val\_t(alignof(vec4)))}
+
+换句话说，\texttt{new} 现在知晓对象的对齐要求。
+
+\begin{myInfoBox}
+该变更由 P0035R4\footnote{\url{http://wg21.link/p0035r4}} 提出。
+\end{myInfoBox}
+
+\section{作为类型系统一部分的异常说明}
+
+函数的异常说明（Exception Specification）过去并不属于函数的类型，但如今它将成为函数类型的一部分。
+
+现在你可以拥有两个函数重载：一个带 \texttt{noexcept}，另一个不带。
+
+例如，在下面的情形中你会得到错误：
+
+\begin{codebox}[cpp]
+void (*p)();
+void (**pp)() noexcept = &p; // error: cannot convert to
+// pointer to noexcept function
+struct S { typedef void (*p)(); operator p(); };
+void (*q)() noexcept = S(); // error: cannot convert to
+// pointer to noexcept
+\end{codebox}
+
+加入这一特性的原因之一，是为了允许更好的优化。当你能保证某个函数是 \texttt{noexcept}、且不会抛出任何异常时，这种优化就有可能发生。
+
+此外，正如前一章“语言修复”中所讲，在 C++17 中，异常说明通过移除已弃用的异常规范而得到了清理。实际上，你只能使用 \texttt{noexcept} 说明符\footnote{\url{http://en.cppreference.com/w/cpp/language/noexcept_spec}} 来声明一个函数是否会抛出异常。
+
+\begin{myInfoBox}
+该变更由 P0012R1\footnote{\url{http://wg21.link/p0012r1}} 提出。
+\end{myInfoBox}
+
+\section{编译器支持}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+更严格的表达式求值顺序 & 7.0 & 4.0 & VS 2017 \\
+保证的拷贝消除 & 7.0 & 4.0 & VS 2017 15.6 \\
+为过度对齐数据动态分配内存 & 7.0 & 4.0 & VS 2017 15.5 \\
+异常说明作为类型系统的一部分 & 7.0 & 4.0 & VS 2017 15.5 \\
+\bottomrule
+\end{tabularx}
+\end{table}

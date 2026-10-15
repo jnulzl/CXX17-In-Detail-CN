@@ -1,0 +1,682 @@
+C++17 是这门语言一次重要的更新，为标准库带来了大量新特性。到目前为止，本书已经涵盖了其中最重要的部分，但还有更多内容值得介绍！本章将简要总结标准库中的其它变化：
+
+\begin{itemize}
+\item 什么是 \texttt{std::byte}？
+\item 映射（map）和集合（set）有哪些新功能
+\item 新算法：采样（sampling）
+\item 特殊数学函数
+\item 共享指针（shared pointer）与数组
+\item 非成员函数 \texttt{size()}、\texttt{data()} 和 \texttt{empty()}
+\item 标准库新增的 \texttt{constexpr} 内容
+\item 如何用 \texttt{scoped\_lock} 同时锁定多个互斥量？
+\item 什么是多态分配器（polymorphic allocator）？它如何帮助内存管理？
+\end{itemize}
+
+
+\subsection{std::byte}
+
+\texttt{std::byte} 是一个小型类型，它让你以字节和比特的视角来看待数据，而不是将其当作数值或字符值（例如 \texttt{unsigned char}）。在标准库中，它被定义为一个枚举：
+
+\begin{codebox}[cpp]
+enum class byte : unsigned char {} ; // 位于 <cstddef> 中
+\end{codebox}
+
+可以用语法 \texttt{byte b\{unsigned char\}} 从 \texttt{unsigned char} 初始化 \texttt{byte}，并可以通过 \texttt{std::to\_integer()} 把 \texttt{byte} 转换为数值类型。
+
+来看一个基本示例：
+
+\begin{codebox}[cpp]
+// 第 14 章 STL Other/byte.cpp
+#include <cstddef>
+int main() {
+constexpr std::byte b{1};
+// std::byte c{3535353}; // 错误：从 int 发生窄化转换
+constexpr std::byte c{255};
+// 移位：
+constexpr auto b1 = b << 7;
+static_assert(std::to_integer<int>(b)
+== 0x01);
+static_assert(std::to_integer<int>(b1) == 0x80);
+// 各种位运算符，如 &、|、^ 等
+constexpr auto c1 = b1 ^ c;
+static_assert(std::to_integer<int>(c)
+== 0xff);
+static_assert(std::to_integer<int>(c1) == 0x7f);
+constexpr auto c2 = ~c1;
+static_assert(std::to_integer<int>(c2)
+== 0x80);
+static_assert(c2 == b1);
+}
+\end{codebox}
+
+\texttt{std::byte} 背后的主要动机是在内存/字节访问场景下提供类型安全。参见提案论文 P0298R3\footnote{\url{https://wg21.link/P0298R3}}。
+
+
+\section{映射与集合的改进}
+
+在标准库中，映射和集合有两个值得注意的新特性：
+
+\begin{itemize}
+\item 拆分（splicing）映射与集合 —— P0083\footnote{\url{https://wg21.link/P0083}}
+\item 新的就地构造（emplacement）例程 —— N4279\footnote{\url{https://wg21.link/N4279}}
+\end{itemize}
+
+
+\subsection{拆分（Splicing）}
+
+现在你可以把节点从一个基于树的容器（映射/集合）移动到另一个容器中，而无需额外的内存开销或内存分配。
+
+例如：
+
+\begin{codebox}[cpp]
+// 第 14 章 STL Other/set_extract_insert.cpp
+#include <set>
+#include <string>
+#include <iostream>
+struct User {
+std::string name;
+User(std::string s) : name(std::move(s)) {
+std::cout << "User::User(" << name << ")\n";
+}
+~User() {
+std::cout << "User::~User(" << name << ")\n";
+}
+User(const User& u) : name(u.name) {
+std::cout << "User::User(copy, " << name << ")\n";
+}
+friend bool operator<(const User& u1, const User& u2) {
+return u1.name < u2.name;
+}
+};
+int main() {
+std::set<User> setNames;
+setNames.emplace("John");
+setNames.emplace("Alex");
+setNames.emplace("Bartek");
+std::set<User> outSet;
+std::cout << "move John...\n";
+// 把 John 移动到 outSet
+auto handle = setNames.extract(User("John"));
+outSet.insert(std::move(handle));
+for (auto& elem : setNames)
+std::cout << elem.name << '\n';
+std::cout << "cleanup...\n";
+}
+\end{codebox}
+
+输出：
+
+\begin{codebox}
+User::User(John)
+User::User(Alex)
+User::User(Bartek)
+move John...
+User::User(John)
+User::~User(John)
+Alex
+Bartek
+cleanup...
+User::~User(John)
+User::~User(Bartek)
+User::~User(Alex)
+\end{codebox}
+
+在上面的例子中，元素 “John” 被从 \texttt{setNames} 提取到了 \texttt{outSet} 中。\texttt{extract} 方法把找到的节点移出集合，并将其从容器中物理上分离出来。之后，被提取的节点可以被插入到同类型的另一个容器中。
+
+在 C++17 之前，如果你想把一个对象从一个映射（或集合）移动到另一个映射（或集合），就必须先从第一个容器中移除它，然后再拷贝/移动进另一个容器。借助这一新功能，你可以直接操作树节点（通过使用实现定义的类型 \texttt{node\_type}），而让对象本身不受影响。这种技术让你可以处理不可移动的元素，当然，它也更加高效。
+
+
+\subsection{映射与无序映射的就地构造增强}
+
+借助 C++17，映射和无序映射新增了两个方法：
+
+\begin{itemize}
+\item \texttt{try\_emplace()} —— 如果对象已经存在则什么都不做，否则其行为与 \texttt{emplace()} 相同。
+  \begin{itemize}
+  \item \texttt{emplace()} 在键已经存在于映射中时，可能会从输入参数移动走资源，因此在进行此类就地构造之前，最好先使用 \texttt{find()}。
+  \end{itemize}
+\item \texttt{insert\_or\_assign()} —— 比 \texttt{operator[]} 提供更多信息，因为它会返回该元素是 newly 插入还是被更新，并且也适用于没有默认构造函数的类型。
+\end{itemize}
+
+\mySmallsection{try\_emplace 方法}
+
+下面是一个例子：
+
+\begin{codebox}[cpp]
+// 第 14 章 STL Other/try_emplace_map.cpp
+#include <iostream>
+#include <string>
+#include <map>
+int main() {
+std::map<std::string, int> m;
+m["hello"] = 1;
+m["world"] = 2;
+// C++11 方式：
+if (m.find("great") == std::end(m))
+m["great"] = 3;
+// 如果 "great" 不在 map 中，会执行两次查找
+// C++17 方式：
+m.try_emplace("super", 4);
+m.try_emplace("hello", 5); // 不会插入，因为它
+// 已经在 map 中
+for (const auto& [key, value] : m)
+std::cout << key << " -> " << value << '\n';
+}
+\end{codebox}
+
+\texttt{try\_emplace} 的行为在你把元素移动进 \texttt{map} 时尤为重要：
+
+\begin{codebox}[cpp]
+// 第 14 章 STL Other/try_emplace_map_move.cpp
+#include <iostream>
+#include <string>
+#include <map>
+int main() {
+std::map<std::string, std::string> m;
+m["Hello"] = "World";
+std::string s = "C++";
+m.emplace(std::make_pair("Hello", std::move(s)));
+// 字符串 's' 会发生什么？
+std::cout << s << '\n';
+std::cout << m["Hello"] << '\n';
+s = "C++";
+m.try_emplace("Hello", std::move(s));
+std::cout << s << '\n';
+std::cout << m["Hello"] << '\n';
+}
+\end{codebox}
+
+这段代码试图把 \texttt{["Hello", "World"]} 替换为 \texttt{["Hello", "C++"]}。如果运行这个例子，你会发现 \texttt{emplace} 之后字符串 \texttt{s} 变空了，而且值 “World” 并没有被改成 “C++”！在键已经存在于容器中的情况下，\texttt{try\_emplace} 什么都不做，因此字符串 \texttt{s} 保持不变。
+
+\mySmallsection{insert\_or\_assign 方法}
+
+第二个函数 \texttt{insert\_or\_assign} 会在映射中插入一个新对象，或者赋入新的值。但与 \texttt{operator[]} 不同的是，它也能用于没有默认构造函数的类型。
+
+\begin{codebox}[cpp]
+// 第 14 章 STL Other/insert_or_assign.cpp
+#include <string>
+#include <map>
+#include <iostream>
+struct User {
+std::string name;
+User(std::string s) : name(std::move(s)) {
+std::cout << "User::User(" << name << ")\n";
+}
+~User() {
+std::cout << "User::~User(" << name << ")\n";
+}
+User(const User& u) : name(u.name) {
+std::cout << "User::User(copy, " << name << ")\n";
+}
+friend bool operator<(const User& u1, const User& u2) {
+return u1.name < u2.name;
+}
+};
+int main() {
+std::map<std::string, User> mapNicks;
+//mapNicks["John"] = User("John Doe"); // 错误：User() 没有默认构造函数
+auto [iter, inserted] = mapNicks.insert_or_assign("John", User("John Doe"));
+if (inserted)
+std::cout << iter->first << " entry was inserted\n";
+else
+std::cout << iter->first << " entry was updated\n";
+}
+\end{codebox}
+
+输出：
+
+\begin{codebox}
+User::User(John Doe)
+User::User(copy, John Doe)
+User::~User(John Doe)
+John entry was inserted
+User::~User(John Doe)
+\end{codebox}
+
+在上面的例子中，我们无法使用 \texttt{operator[]} 来向容器中插入一个新值，因为它不支持没有默认构造函数的类型。我们可以用这个新函数做到。\texttt{insert\_or\_assign} 会返回一个 \texttt{<iterator, bool>} 对。如果布尔值为 \texttt{true}，意味着该元素被插入到了容器中；否则，它就是被重新赋值的。
+
+
+\section{Emplace 方法的返回类型}
+
+从 C++11 起，大多数标准容器都获得了 \texttt{.emplace*} 方法。借助这些方法，你可以在原地创建一个新对象，而无需额外的对象拷贝。
+
+然而，大多数 \texttt{.emplace*} 方法此前并不返回任何值 —— 它们都是 \texttt{void}。从 C++17 起这一点发生了变化，它们现在会返回被插入对象的引用类型。
+
+例如：
+
+\begin{codebox}[cpp]
+// 自 C++11 起，直到 C++17（针对 std::vector）
+template< class... Args >
+void emplace_back( Args&&... args );
+// 自 C++17 起（针对 std::vector）
+template< class... Args >
+reference emplace_back( Args&&... args );
+\end{codebox}
+
+这一改动会缩短这样的代码：先向容器中添加一些东西，然后再对新添加的对象执行某些操作。
+
+例如：
+
+\begin{codebox}[cpp]
+// 第 14 章 STL Other/emplace_return.cpp
+#include <vector>
+#include <string>
+int main() {
+std::vector<std::string> stringVector;
+// C++11/14 中：
+stringVector.emplace_back("Hello");
+// emplace 不返回任何东西，所以需要 back()
+stringVector.back().append(" World");
+// C++17 中：
+stringVector.emplace_back("Hello").append(" World");
+}
+\end{codebox}
+
+相关提案论文：P0084R2\footnote{\url{http://wg21.link/p0084r2}}。
+
+
+\section{采样算法}
+
+新算法 \texttt{std::sample} 可以从序列中选取 n 个元素：
+
+\begin{codebox}[cpp]
+// 第 14 章 STL Other/sample.cpp
+#include <iostream>
+#include <random>
+#include <iterator>
+#include <algorithm>
+int main() {
+std::vector<int> v { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+std::vector<int> out;
+std::sample(v.begin(),
+// 范围起始
+v.end(),
+// 范围结束
+std::back_inserter(out), // 输出位置
+3,
+// 要采样的元素个数
+std::mt19937{std::random_device{}()});
+std::cout << "Sampled values: ";
+for (const auto &i : out)
+std::cout << i << ", ";
+}
+\end{codebox}
+
+可能的输出：
+
+\begin{codebox}
+Sampled values: 1, 4, 9,
+\end{codebox}
+
+这一新的采样算法来自对库基础 V1 技术规范（Library Fundamentals V1 TS）组件的采纳：采样 P0220R1\footnote{\url{https://wg21.link/p0220}}。
+
+
+\section{新的数学函数}
+
+C++17 为我们带来了许多新的数学函数，例如 \texttt{std::gcd}（最大公约数，Greatest Common Divisor）、\texttt{std::lcm}（最小公倍数，Least Common Multiple）、\texttt{std::clamp} 以及其它一些特殊函数。
+
+例如声明在 \texttt{<numeric>} 头文件中的 \texttt{std::gcd} 和 \texttt{std::lcm}：
+
+\begin{codebox}[cpp]
+// 第 14 章 STL Other/numeric_gcd_lcm.cpp
+#include <iostream>
+#include <numeric>
+// 用于 gcd、lcm
+int main() {
+std::cout << std::gcd(24, 60) << '\n';
+std::cout << std::lcm(15, 50) << '\n';
+}
+\end{codebox}
+
+输出：
+
+\begin{codebox}
+12
+150
+\end{codebox}
+
+这两个函数是在 P0295R0\footnote{\url{http://wg21.link/p0295r0}} 中引入的。
+
+另一个有用的函数是 \texttt{std::clamp(v, min, max)}，声明在 \texttt{<algorithm>} 中，它是在 P0025\footnote{\url{http://wg21.link/p0025}} 中引入的。
+
+\begin{codebox}[cpp]
+// 第 14 章 STL Other/clamp.cpp
+#include <iostream>
+#include <algorithm>
+// clamp
+int main() {
+std::cout << std::clamp(300, 0, 255) << '\n';
+std::cout << std::clamp(-10, 0, 255) << '\n';
+}
+\end{codebox}
+
+输出：
+
+\begin{codebox}
+255
+\end{codebox}
+
+此外，在 \texttt{<cmath>} 头文件中还新增了许多可用的特殊函数：
+
+\begin{itemize}
+\item \texttt{assoc\_laguerre}
+\item \texttt{assoc\_legendre}
+\item \texttt{beta}
+\item \texttt{comp\_ellint\_1}
+\item \texttt{comp\_ellint\_2}
+\item \texttt{comp\_ellint\_3}
+\item \texttt{conf\_hyperg}
+\item \texttt{cyl\_bessel\_i}
+\item \texttt{cyl\_bessel\_j}
+\item \texttt{cyl\_bessel\_k}
+\item \texttt{cyl\_neumann}
+\item \texttt{ellint\_1}
+\item \texttt{ellint\_2}
+\item \texttt{ellint\_e}
+\item \texttt{erfc}
+\item \texttt{erf}
+\item \texttt{expint}
+\item \texttt{hermite}
+\item \texttt{hyperg}
+\item \texttt{laguerre}
+\item \texttt{legendre}
+\item \texttt{riemann\_zeta}
+\item \texttt{sph\_bessel}
+\item \texttt{sph\_legendre}
+\item \texttt{sph\_neumann}
+\item \texttt{tgamma}
+\end{itemize}
+
+上述特殊函数是在 N1542 ver 3\footnote{\url{http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2003/n1542.pdf}} 中引入的。
+
+
+\section{共享指针与数组}
+
+在 C++17 之前，只有 \texttt{unique\_ptr} 能够开箱即用地处理数组（无需定义自定义的删除器）。现在 \texttt{shared\_ptr} 也可以了。
+
+\begin{codebox}[cpp]
+std::shared_ptr<int[]> ptr(new int[10]);
+\end{codebox}
+
+请注意，\texttt{std::make\_shared} 在 C++17 中不支持数组。但这一问题将在 C++20 中得到修复（参见已经合并进 C++20 的 P0674\footnote{\url{https://wg21.link/p0674}}）。
+
+另一个重要的提醒是，原始数组应当被避免。通常最好使用标准容器。然而有时你并没有使用 \texttt{vector} 或 \texttt{list} 的奢侈条件 —— 例如在嵌入式环境中，或者当你使用第三方 API 时。在这种情况下，你可能会拿到一个指向数组的原始指针。借助 C++17，你可以把这些指针包装进智能指针（\texttt{std::unique\_ptr} 或 \texttt{std::shared\_ptr}）中，并确保内存被正确释放。
+
+相关提案论文：P0414R2\footnote{\url{https://wg21.link/P0414R2}}。
+
+
+\section{非成员 size()、data() 和 empty()}
+
+继 C++11 引入非成员函数 \texttt{std::begin()} 和 \texttt{std::end()} 之后，C++17 又带来了三个新函数。
+
+\begin{codebox}[cpp]
+// 第 14 章 STL Other/non_member_functions.cpp
+#include <iostream>
+#include <vector>
+template <class Container>
+void PrintBasicInfo(const Container& cont) {
+std::cout << typeid(cont).name() << '\n';
+std::cout << std::size(cont) << '\n';
+std::cout << std::empty(cont) << '\n';
+if (!std::empty(cont))
+std::cout << *std::data(cont) << '\n';
+}
+int main() {
+std::vector<int> iv { 1, 2, 3, 4, 5 };
+PrintBasicInfo(iv);
+float arr[4] = { 1.1f, 2.2f, 3.3f, 4.4f };
+PrintBasicInfo(arr);
+}
+\end{codebox}
+
+输出（来自 GCC 8.2）：
+
+\begin{codebox}
+St6vectorIiSaIiEE
+5
+A4_f
+4
+0
+1.1
+\end{codebox}
+
+这些新函数位于 \texttt{<iterator>} 头文件中，相关提案论文是 N4280\footnote{\url{https://wg21.link/n4280}}。
+
+
+\section{标准库新增的 constexpr 内容}
+
+借助这一增强，你可以在 \texttt{constexpr} 语境中使用迭代器、访问区间。主要的提案论文是 P0031 —— 为 \texttt{reverse\_iterator}、\texttt{move\_iterator}、\texttt{array} 以及区间访问（Range Access）添加 \texttt{constexpr} 修饰符的提案\footnote{\url{https://wg21.link/p0031}}。
+
+来看一个基本示例，它展示了把 \texttt{accumulate} 算法实现为 \texttt{constexpr} 的简易版本（当前版本的 \texttt{std::accumulate} 并非 \texttt{constexpr}）：
+
+\begin{codebox}[cpp]
+// 第 14 章 STL Other/constexpr_additions.cpp
+#include <array>
+template<typename Range, typename Func, typename T>
+constexpr T SimpleAccumulate(const Range& range, Func func, T init) {
+for (auto &&obj : range) { // begin/end 是 constexpr 的
+init += func(obj);
+}
+return init;
+}
+constexpr int square(int i) { return i*i; }
+int main() {
+constexpr std::array arr{ 1, 2, 3 }; // 类模板推导……
+// 使用 constexpr lambda
+static_assert(SimpleAccumulate(arr, [](int i) constexpr {
+return i * i;
+}, 0) == 14);
+// 使用 constexpr 函数
+static_assert(SimpleAccumulate(arr, &square, 0) == 14);
+return arr[0];
+}
+\end{codebox}
+
+C++14 的编译器无法编译上述示例，但在支持 C++17 后就可以做到了。
+
+这段代码使用了以下几个特性：
+
+\begin{itemize}
+\item \texttt{SimpleAccumulate} 是一个 \texttt{constexpr} 模板函数，它使用区间访问（隐藏在基于区间的 \texttt{for} 循环中）来遍历输入区间。
+\item \texttt{arr} 被推导为 \texttt{std::array<3, int>} —— 这里类模板推导（class template deduction）生效了。
+\item 代码中使用了 \texttt{constexpr} lambda。
+\item 不带任何消息的 \texttt{static\_assert}。
+\end{itemize}
+
+每一个 C++ 标准都允许越来越多的代码成为 \texttt{constexpr}。在 C++17 中，我们可以开始在常量表达式中使用基础容器；而在未来，C++20 甚至会让标准算法也支持这一选项（如果可行的话）。
+
+
+\subsection{std::scoped\_lock}
+
+借助 C++11 和 C++14，我们获得了线程库以及许多支持性功能。例如，通过 \texttt{std::lock\_guard} 你可以以 RAII 风格持有一个互斥量的所有权并将其锁定：
+
+\begin{codebox}[cpp]
+std::mutex m;
+std::lock_guard<std::mutex> lock_one(m);
+// 当 lock_one 离开作用域时自动解锁……
+\end{codebox}
+
+上面的代码可以工作，但仅适用于单个互斥量。如果你想锁定多个互斥量，就不得不使用另一种模式，例如：
+
+\begin{codebox}[cpp]
+std::mutex first_mutex;
+std::mutex second_mutex;
+// ...
+std::lock(fist_mutex, second_mutex);
+std::lock_guard<std::mutex> lock_one(fist_mutex, std::adopt_lock);
+std::lock_guard<std::mutex> lock_two(second_mutex, std::adopt_lock);
+// ..
+\end{codebox}
+
+到了 C++17，事情变得简单了一些，因为借助 \texttt{std::scoped\_lock} 你可以同时锁定可变数量（variadic）的多个互斥量。
+
+\begin{codebox}[cpp]
+std::scoped_lock lck(first_mutex, second_mutex);
+\end{codebox}
+
+出于兼容性考虑，\texttt{std::lock\_guard} 无法扩展以支持可变数量的输入互斥量，因此才需要一个新类型 —— \texttt{scoped\_lock}。
+
+你可以在 P0156\footnote{\url{https://wg21.link/p0156}} 中了解更多。
+
+
+\section{std::iterator 已被弃用}
+
+标准库 API 要求每个迭代器类型都必须暴露五个 typedef：
+
+\begin{itemize}
+\item \texttt{iterator\_category} —— 迭代器的类型
+\item \texttt{value\_type} —— 迭代器中存储的类型
+\item \texttt{difference\_type} —— 两个迭代器相减所得结果的类型
+\item \texttt{pointer} —— 所存类型的指针类型
+\item \texttt{reference} —— 所存类型的引用类型
+\end{itemize}
+
+\texttt{iterator\_category} 必须是 \texttt{input\_iterator\_tag}、\texttt{forward\_iterator\_tag}、\texttt{bidirectional\_iterator\_tag} 或 \texttt{random\_access\_iterator\_tag} 之一。
+
+在 C++17 之前，如果你想定义一个自定义迭代器，可以使用 \texttt{std::iterator} 作为基类。在 C++14 中它被定义为：
+
+\begin{codebox}[cpp]
+template<
+class Category,
+class T,
+class Distance = std::ptrdiff_t,
+class Pointer = T*,
+class Reference = T&
+> struct iterator;
+\end{codebox}
+
+这个辅助类让你可以以一种简写的方式来定义这些 typedef：
+
+\begin{codebox}[cpp]
+class ColumnIterator
+: public std::iterator<std::random_access_iterator_tag, Column>
+{
+// ...
+};
+\end{codebox}
+
+在 C++17 中，你不能再从 \texttt{std::iterator} 派生，而需要显式地写出这些特征 typedef：
+
+\begin{codebox}[cpp]
+class ColumnIterator {
+public:
+using iterator_category = std::random_iterator_tag;
+using value_type = Column;
+using difference_type = std::ptrdiff_t;
+using pointer = Column*;
+using reference = Column&;
+// ...
+};
+\end{codebox}
+
+虽然你必须写更多的代码，但这样更容易阅读，也更不容易出错。
+
+例如，提案论文提到了下面这段来自《The Standard Library》一书的例子：
+
+\begin{codebox}[cpp]
+template <class T, class charT = char, class traits = char_traits<charT> >
+class ostream_iterator:
+public iterator<output_iterator_tag, void, void, void, void>;
+\end{codebox}
+
+在上面的代码中，并不清楚定义里那四个 \texttt{void} 类型都表示什么。此外，\texttt{std::iterator} 还可能导致名字查找时产生复杂的错误，尤其是当你在派生迭代器中碰巧使用了与基类相同的名字时。
+
+你可以在提案论文 P0174R2 —— 在 C++17 中弃用遗留库组件（Deprecating Vestigial Library Parts in C++17）\footnote{\url{https://wg21.link/p0174r2}} 中了解更多。
+
+
+\section{多态分配器，pmr}
+
+多态分配器是对标准库中标准分配器的一项增强。简而言之，多态分配器遵循标准库中分配器的规则，但在其核心，它使用一个内存资源（memory resource）对象来执行内存管理。多态分配器包含一个指向内存资源类的指针，因此它能够使用虚方法分派。你可以在运行时更换内存资源，同时保持分配器的类型不变。
+
+所有与多态分配器相关的类型都位于一个独立的命名空间 \texttt{std::pmr}（PMR 代表 Polymorphic Memory Resource，多态内存资源）中，定义于 \texttt{<memory\_resource>} 头文件。
+
+pmr 的核心元素：
+
+\begin{itemize}
+\item \texttt{std::pmr::memory\_resource} —— 是所有其它实现的抽象基类。它定义了以下纯虚方法：\texttt{do\_allocate}、\texttt{do\_deallocate} 和 \texttt{do\_is\_equal}。
+\item \texttt{std::pmr::polymorphic\_allocator} —— 是一个标准分配器的实现，它使用 \texttt{memory\_resource} 对象来执行内存的分配与释放。
+\item 通过 \texttt{new\_delete\_resource()} 和 \texttt{null\_memory\_resource()} 访问的全局内存资源。
+\item 一组预定义的内存池资源类：\texttt{synchronized\_pool\_resource}、\texttt{unsynchronized\_pool\_resource} 和 \texttt{monotonic\_buffer\_resource}。
+\item 标准容器针对多态分配器的模板特化，例如 \texttt{std::pmr::vector}、\texttt{std::pmr::string}、\texttt{std::pmr::map} 等。每个特化都定义在与对应容器相同的头文件中。
+\end{itemize}
+
+下面简要介绍一下这些预定义的内存资源：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X X}
+\toprule
+资源 & 说明 \\
+\midrule
+\texttt{new\_delete\_resource()} & 一个返回指向全局“默认”内存资源的指针的普通函数。它通过全局 \texttt{new} 和 \texttt{delete} 来管理内存。 \\
+\texttt{null\_delete\_resource()} & 一个返回指向全局“空”内存资源的指针的普通函数，它在每次分配时都会抛出 \texttt{std::bad\_alloc}。 \\
+\texttt{synchronized\_pool\_resource} & 线程安全的分配器，管理不同大小的池。每个池都是一组被划分为等大小块的块。 \\
+\texttt{unsynchronized\_pool\_resource} & 非线程安全的 \texttt{pool\_resource}。 \\
+\texttt{monotonic\_buffer\_resource} & 非线程安全、快速、专用目的的资源，它从一块预分配的缓冲区获取内存，但在释放时并不归还内存。 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+值得一提的是，内存池资源（包括 \texttt{monotonic\_buffer\_resource}）可以串成链。因此，如果某个池中没有可用内存，分配器就会从“上游（upstream）”资源中分配内存。
+
+下面你可以找到一个关于 \texttt{monotonic\_buffer\_resource} 和 \texttt{pmr::vector} 的简单示例：
+
+\begin{codebox}[cpp]
+// 第 14 章 STL Other/pmr_monotonic_resource.cpp
+#include <iostream>
+#include <memory_resource>
+// pmr 核心类型
+#include <vector>
+// pmr::vector
+int main() {
+char buffer[64] = {}; // 栈上的一个小型缓冲区
+std::fill_n(std::begin(buffer), std::size(buffer) - 1, '_');
+std::cout << buffer << '\n';
+std::pmr::monotonic_buffer_resource pool{ std::data(buffer), std::size(buffer) };
+std::pmr::vector<char> vec{ &pool };
+for (char ch = 'a'; ch <= 'z'; ++ch)
+vec.push_back(ch);
+std::cout << buffer << '\n';
+}
+\end{codebox}
+
+可能的输出：
+
+\begin{codebox}
+_______________________________________________________________
+aababcdabcdefghabcdefghijklmnopabcdefghijklmnopqrstuvwxyz______
+\end{codebox}
+
+在上面的例子中，我们使用了一个用来自栈的内存块初始化的单调缓冲资源。借助一个简单的 \texttt{char buffer[]} 数组，我们可以轻松地打印出“内存”的内容。\texttt{vector} 从池中获取内存，如果空间不足，它会向“上游”资源（默认是 \texttt{new\_delete\_resource}）申请内存。这个例子展示了当需要插入更多元素时 \texttt{vector} 的重新分配过程。每次 \texttt{vector} 获得更多空间，最终就能容纳下所有的字母。
+
+\mySmallsection{更多信息}
+
+本节只是触及了多态分配器和内存资源这一主题的皮毛。如果你想深入了解这个话题，Nicolai Josuttis 所著的《C++17 The Complete Guide》\footnote{\url{https://leanpub.com/cpp17}} 中有一整章专门讲解。此外还有一些会议演讲，例如 Pablo Halpern 在 CppCon 2017 上的《Allocators: The Good Parts》\footnote{\url{https://channel9.msdn.com/Events/GoingNative/CppCon-2017/119}}。
+
+更多信息请参见 P0220R1\footnote{\url{https://wg21.link/p0220r1}} 和 P0337R0\footnote{\url{https://wg21.link/p0337r0}}。
+
+
+\section{编译器支持}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+\texttt{std::byte} & 7.1 & 5.0 & VS 2017 15.3 \\
+映射与集合的改进 & 7.0 & 3.9 & VS 2017 15.5 \\
+\texttt{insert\_or\_assign()}/\texttt{try\_emplace()}（针对 map） & 6.1 & 3.7 & VS 2017 15 \\
+Emplace 返回类型 & 7.1 & 4.0 & VS 2017 15.3 \\
+采样算法 & 7.1 & In Progress & VS 2017 15 \\
+\texttt{gcd} 与 \texttt{lcm} & 7.1 & 4.0 & VS 2017 15.3 \\
+\texttt{clamp} & 7.1 & 3.9 & VS 2015.3 \\
+特殊数学函数 & 7.1 & Not yet & VS 2017 15.7 \\
+共享指针与数组 & 7.1 & In Progress & VS 2017 15.5 \\
+非成员 \texttt{size()}、\texttt{data()} 和 \texttt{empty()} & 6.1 & 3.6 & VS 2015 \\
+标准库新增 \texttt{constexpr} 内容 & 7.1 & 4.0 & VS 2017 15.3 \\
+\texttt{scoped\_lock} & 7.1 & 5.0 & VS 2017 15.3 \\
+多态分配器与内存资源 & 9.1 & In Progress & VS 2017 15.6 \\
+\bottomrule
+\end{tabularx}
+\end{table}

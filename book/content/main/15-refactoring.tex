@@ -1,0 +1,258 @@
+% stub
+
+std::variant 和 std::optional 被称为“词汇（vocabulary）类型”，因为你可以通过它们传达更多的设计信息。你的代码可以变得更加紧凑、更具表达力。本章将通过一个示例展示 std::optional 和 std::variant 如何帮助你重构一个函数。我们会从一些遗留代码开始，经过若干步骤，最终得到一个好得多的方案。为了帮助你更好地理解，我们将看到每一步的优缺点。
+
+\section{使用场景}
+
+设想一个函数，它接收某款游戏中当前的鼠标选区。该函数扫描所选范围，并计算出若干输出：
+
+\begin{itemize}
+\item 正在执行动画的对象数量
+\item 选区中是否包含任何民用单位
+\item 选区中是否包含任何战斗单位
+\end{itemize}
+
+现有代码看起来像这样：
+
+\begin{codebox}[cpp]
+class ObjSelection
+{
+public:
+    bool IsValid() const { return true; }
+    // 更多代码...
+};
+
+bool CheckSelectionVer1(const ObjSelection &objList,
+                        bool *pOutAnyCivilUnits,
+                        bool *pOutAnyCombatUnits,
+                        int *pOutNumAnimating);
+\end{codebox}
+
+如你所见，该函数使用了大量输出参数（以裸指针的形式），并返回 true/false 来指示成功与否（例如，输入的选区可能无效）。
+
+该函数具体的实现现在并不重要，但下面是一个调用该函数的示例代码：
+
+\begin{codebox}[cpp]
+ObjSelection sel;
+bool anyCivilUnits { false };
+bool anyCombatUnits { false };
+int numAnimating { 0 };
+if (CheckSelectionVer1(sel, &anyCivilUnits, &anyCombatUnits, &numAnimating))
+{
+    // ...
+}
+\end{codebox}
+
+我们该如何改进这个函数呢？可能要从以下几个方面入手：
+
+\begin{itemize}
+\item 看看调用方的代码：我们必须创建所有用来保存输出的变量。如果你在多处调用这个函数，无疑会产生代码重复。
+\item 输出参数：Core Guidelines（核心指南）建议不要使用它们。
+  \begin{itemize}
+  \item F.20：对于“out”输出值，优先使用返回值而非输出参数\footnote{\url{https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines\#f20-for-out-output-values-prefer-return-values-to-output-parameters}}。
+  \end{itemize}
+\item 如果使用裸指针，你就必须检查它们是否有效。如果改用引用作为输出参数，则可以省去这些检查。
+\item 那扩展这个函数呢？如果你需要再增加一个输出参数怎么办？
+\end{itemize}
+
+还有别的吗？
+
+你会如何重构它呢？
+
+受 Core Guidelines 与 C++17 新特性的启发，下面是我们改进这段代码的方法：
+
+\begin{enumerate}
+\item 把输出参数重构为一个将被返回的 tuple。
+\item 把 tuple 重构为一个独立的结构体，并将 tuple 缩减为一个 pair。
+\item 使用 std::optional 来表达该值是否被计算出来。
+\item 使用 std::variant 不仅传达可选的结果，还传达完整的错误信息。
+\end{enumerate}
+
+\section{Tuple 版本}
+
+第一步是把输出参数转换成一个 tuple，并从函数返回它。
+
+根据 F.21：要返回多个“out”值，最好返回一个 tuple 或 struct\footnote{\url{https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines\#f21-to-return-multiple-out-values-prefer-returning-a-tuple-or-struct}}：
+
+\begin{myQuote}
+返回值是一种“仅输出”的值，本身具有自说明性。请注意，C++ 确实支持多返回值，其约定方式是使用 tuple（包括 pair），在调用处还可以借助 tie 带来额外的便利。
+\end{myQuote}
+
+改动之后，代码可能变成这样：
+
+\begin{codebox}[cpp]
+std::tuple<bool, bool, bool, int>
+CheckSelectionVer2(const ObjSelection &objList)
+{
+    if (!objList.IsValid())
+        return {false, false, false, 0};
+    // 局部变量：
+    int numCivilUnits = 0;
+    int numCombat = 0;
+    int numAnimating = 0;
+    // 扫描...
+    return {true, numCivilUnits > 0, numCombat > 0, numAnimating };
+}
+\end{codebox}
+
+好一点了……不是吗？
+
+\begin{itemize}
+\item 无需检查裸指针
+\item 代码相当有表达力
+\end{itemize}
+
+此外，在调用处，你可以使用结构化绑定（Structured Bindings）来接收返回的 tuple：
+
+\begin{codebox}[cpp]
+auto [ok, anyCivil, anyCombat, numAnim] = CheckSelectionVer2(sel);
+if (ok)
+{
+    // ...
+}
+\end{codebox}
+
+遗憾的是，这个版本未必是最好的。例如，存在忘记 tuple 中各输出顺序的风险。
+
+函数扩展的问题也依然存在。因此，当你想增加另一个输出值时，就必须扩展这个 tuple 以及调用处。
+
+我们可以通过再前进一步来解决这个问题：不再使用 tuple，而是使用一个结构体（Core Guidelines 也建议这么做）。
+
+\section{一个独立的结构体}
+
+这些输出看起来表示的是相关的数据。因此，把它们封装到一个名为 SelectionData 的 struct 中或许是个好主意。
+
+\begin{codebox}[cpp]
+struct SelectionData
+{
+    bool anyCivilUnits { false };
+    bool anyCombatUnits { false };
+    int numAnimating { 0 };
+};
+\end{codebox}
+
+然后你可以把函数改写为：
+
+\begin{codebox}[cpp]
+std::pair<bool, SelectionData> CheckSelectionVer3(const ObjSelection &objList)
+{
+    SelectionData out;
+    if (!objList.IsValid())
+        return {false, out};
+    // 扫描...
+    return {true, out};
+}
+\end{codebox}
+
+而调用处：
+
+\begin{codebox}[cpp]
+if (auto [ok, selData] = CheckSelectionVer3(sel); ok)
+{
+    // ...
+}
+\end{codebox}
+
+代码使用了 std::pair，所以我们仍然保留了成功标志，它不属于那个新结构体。
+
+我们在这里获得的主要优势是更好的代码结构与可扩展性。如果你想添加一个新参数，只需扩展该结构体。而在以前——函数的声明里是一长串输出参数——你就得改动多得多的代码。
+
+但 std::pair<bool, MyType> 难道不类似于 std::optional 的概念吗？
+
+\section{使用 std::optional}
+
+引自 std::optional 那一章：
+
+std::optional 是一种包装类型，用来表达“可空（null-able）”类型。它要么包含一个值，要么为空。它不会使用任何额外的内存分配。
+
+这似乎非常适合我们的代码。我们可以去掉 ok 变量，转而依赖 optional 的语义。
+
+新版本的代码：
+
+\begin{codebox}[cpp]
+std::optional<SelectionData> CheckSelectionVer4(const ObjSelection &objList)
+{
+    if (!objList.IsValid())
+        return std::nullopt;
+    SelectionData out;
+    // 扫描...
+    return out;
+}
+\end{codebox}
+
+而调用处：
+
+\begin{codebox}[cpp]
+if (auto ret = CheckSelectionVer4(sel); ret.has_value())
+{
+    // 通过 *ret 访问，或者甚至用 ret->
+    // ret->numAnimating
+}
+\end{codebox}
+
+optional 版本有哪些优势呢？
+
+\begin{itemize}
+\item 形式简洁且富有表达力——optional 表达的是可空类型。
+\item 高效——optional 的实现不允许使用额外的存储（例如动态内存）。所包含的值应当分配在 optional 存储中、针对类型 T 做了适当对齐的区域里。
+\end{itemize}
+
+\section{使用 std::variant}
+
+前面使用 std::optional 的最后一个实现遗漏了一个关键方面：错误处理。我们无从得知某个值没有被计算的原因。例如在使用 std::pair 的版本中，我们可以返回一个错误码来表明原因。对此我们能做什么呢？
+
+如果你需要关于函数内部可能出错的全部信息，可以考虑改用 std::variant 的另一种方案。
+
+\begin{codebox}[cpp]
+enum class [[nodiscard]] ErrorCode
+{
+    InvalidSelection,
+    Undefined
+};
+
+variant<SelectionData, ErrorCode> CheckSelectionVer5(const ObjSelection &objList)
+{
+    if (!objList.IsValid())
+        return ErrorCode::InvalidSelection;
+    SelectionData out;
+    // 扫描...
+    return out;
+}
+\end{codebox}
+
+如你所见，代码使用了 std::variant，它有两种可能的备选项：要么是 SelectionData，要么是 ErrorCode。它几乎就像一个 pair，只不过你始终只会看到其中一个活跃的值。
+
+你可以这样使用上面的实现：
+
+\begin{codebox}[cpp]
+if (auto retV5 = CheckSelectionVer5(sel);
+    std::holds_alternative<SelectionData>(retV5))
+{
+    std::cout << "ok..."
+              << std::get<SelectionData>(retV5).numAnimating << '\n';
+}
+else
+{
+    switch (std::get<ErrorCode>(retV5))
+    {
+    case ErrorCode::InvalidSelection:
+        std::cerr << "Invalid Selection!\n";
+        break;
+    case ErrorCode::Undefined:
+        std::cerr << "Undefined Error!\n";
+        break;
+    }
+}
+\end{codebox}
+
+正如你所看到的，使用 std::variant 能比使用 std::optional 获得更多信息。你可以返回错误码，并对可能出现的失败做出响应。
+
+std::variant<ValueType, ErrorCode> 可能是 std::expected 的一种实现——std::expected 是一个新的词汇类型，未来或许会被纳入标准库。
+
+\section{小结}
+
+你可以在以下位置试验这段代码：\texttt{Chapter Refactoring With Optional And Variant/refactoring\_optional\_variant.cpp}。
+
+在本章中，你已经看到如何把一堆难看的输出参数重构为更优雅的 std::optional 版本。这个 optional 包装清晰地表达了计算所得的值可能不存在。此外，你还看到了如何把多个函数参数封装到一个独立的结构体中。拥有这样一个独立的类型，可以让你轻松扩展代码，同时保持逻辑结构不变。
+
+最后，如果你需要函数内部错误的完整信息，那么也可以考虑改用 std::variant。这种类型让你可以返回一个完整的错误码。

@@ -1,0 +1,173 @@
+C++17 带给我们最强大的语言特性之一，就是以 \texttt{if constexpr} 形式出现的编译期 \texttt{if}。它让你能在编译期检查一个条件，并依据结果将代码从编译的后续步骤中剔除。在本章中，你将看到一个例子，看看这个新特性如何让代码变得更简洁。
+
+\section{问题}
+
+在《Effective Modern C++》的第 18 条中，Scott Meyers 描述了一个名为 \texttt{makeInvestment} 的方法：
+
+\begin{codebox}[cpp]
+template<typename... Ts>
+std::unique_ptr<Investment>
+makeInvestment(Ts&&... params);
+\end{codebox}
+
+这是一个工厂方法，用来创建 \texttt{Investment} 的各个派生类，其主要优势在于支持可变数量的参数！
+
+例如，下面是建议的若干派生类型：
+
+\begin{codebox}[cpp]
+// Chapter If Constexpr Factory/variable_factory.cpp
+// base type:
+class Investment
+{
+public:
+virtual ~Investment() { }
+virtual void calcRisk() = 0;
+};
+class Stock : public Investment
+{
+public:
+explicit Stock(const std::string&) { }
+void calcRisk() override { }
+};
+class Bond : public Investment
+{
+public:
+explicit Bond(const std::string&, const std::string&, int) { }
+void calcRisk() override { }
+};
+class RealEstate : public Investment
+{
+public:
+explicit RealEstate(const std::string&, double, int) { }
+void calcRisk() override { }
+};
+\end{codebox}
+
+书中的代码过于理想化，它只在你的所有类都拥有相同数量和类型的输入参数时才能正常工作：
+
+Scott Meyers 所著的《Effective Modern C++》的修订历史与勘误清单\footnote{\url{http://www.aristeia.com/BookErrata/emc++-errata.html}}：
+
+\begin{myQuote}
+\texttt{makeInvestment} 接口并不现实，因为它暗示所有派生对象类型都能用相同类型的参数来创建。这一点在示例实现代码中尤为明显——那里的参数被完美转发给了所有派生类的构造函数。
+\end{myQuote}
+
+例如，如果你有一个需要两个参数的构造函数，以及另一个需要三个参数的构造函数，那么代码可能就无法编译：
+
+\begin{codebox}[cpp]
+// pseudo code:
+Bond(int, int, int) { }
+Stock(double, double) { }
+make(args...)
+{
+if (bond)
+new Bond(args...);
+else if (stock)
+new Stock(args...)
+}
+\end{codebox}
+
+现在，如果你写下 \texttt{make(bond, 1, 2, 3)}，那么 \texttt{else} 分支将无法编译——因为根本不存在可用的 \texttt{Stock(1, 2, 3)}！为了让它正常工作，我们需要一个编译期的 \texttt{if} 语句，用来剔除那些不符合条件的代码部分。
+
+在我的博客上，借助一位读者的帮助，我们提出了一种可行的解决方案（更多内容可参阅 Bartek 的编程博客：Nice C++ Factory Implementation 2\footnote{\url{http://www.bfilipek.com/2016/03/nice-c-factory-implementation-2.html}}）。
+
+下面是可以正常工作的代码：
+
+\begin{codebox}[cpp]
+template <typename... Ts>
+unique_ptr<Investment>
+makeInvestment(const string &name, Ts&&... params)
+{
+unique_ptr<Investment> pInv;
+if (name == "Stock")
+pInv = constructArgs<Stock, Ts...>(forward<Ts>(params)...);
+else if (name == "Bond")
+pInv = constructArgs<Bond, Ts...>(forward<Ts>(params)...);
+else if (name == "RealEstate")
+pInv = constructArgs<RealEstate, Ts...>(forward<Ts>(params)...);
+// call additional methods to init pInv...
+return pInv;
+}
+\end{codebox}
+
+正如你所见，其中的“魔法”发生在 \texttt{constructArgs} 函数内部。
+
+其核心思想是：当 \texttt{Type} 能由给定的一组属性构造出来时返回 \texttt{unique\_ptr<Type>}，否则返回 \texttt{nullptr}。
+
+\section{C++17 之前}
+
+在之前的方案（C++17 之前）中，必须用到 \texttt{std::enable\_if}：
+
+\begin{codebox}[cpp]
+// before C++17
+template <typename Concrete, typename... Ts>
+enable_if_t<is_constructible<Concrete, Ts...>::value, unique_ptr<Concrete>>
+constructArgsOld(Ts&&... params)
+{
+return std::make_unique<Concrete>(forward<Ts>(params)...);
+}
+template <typename Concrete, typename... Ts>
+enable_if_t<!is_constructible<Concrete, Ts...>::value, unique_ptr<Concrete> >
+constructArgsOld(...)
+{
+return nullptr;
+}
+\end{codebox}
+
+\texttt{std::is\_constructible} 允许我们测试一组参数能否用来创建某个给定类型。
+
+\mySamllsectionNoContent{关于 enable\_if 的简要回顾}
+
+\texttt{enable\_if}（以及自 C++14 起提供的 \texttt{enable\_if\_v}）。它具有如下语法：
+
+\begin{codebox}[cpp]
+template< bool B, class T = void >
+struct enable_if;
+\end{codebox}
+
+当输入条件 \texttt{B} 为真时，\texttt{enable\_if} 会求值为 \texttt{T}。否则，就会触发 \texttt{SFINAE}，某个特定的函数重载会从重载集中被移除。
+
+此外，在 C++17 中还提供了一个辅助变量：\texttt{is\_constructible\_v = is\_constructible<T, Args...>::value;}。
+
+从理论上讲，代码本应更短一些。
+
+尽管如此，使用 \texttt{enable\_if} 看起来仍然丑陋而复杂。C++17 版本又如何呢？
+
+\section{使用 if constexpr}
+
+下面是更新后的版本：
+
+\begin{codebox}[cpp]
+template <typename Concrete, typename... Ts>
+unique_ptr<Concrete> constructArgs(Ts&&... params)
+{
+if constexpr (is_constructible_v<Concrete, Ts...>)
+return make_unique<Concrete>(forward<Ts>(params)...);
+else
+return nullptr;
+}
+\end{codebox}
+
+我们甚至还能借助折叠表达式，为它加上一点日志功能：
+
+\begin{codebox}[cpp]
+template <typename Concrete, typename... Ts>
+std::unique_ptr<Concrete> constructArgs(Ts&&... params)
+{
+cout << __func__ << ": ";
+// fold expression:
+((cout << params << ", "), ...);
+cout << '\n';
+if constexpr (std::is_constructible_v<Concrete, Ts...>)
+return make_unique<Concrete>(forward<Ts>(params)...);
+else
+return nullptr;
+}
+\end{codebox}
+
+\texttt{enable\_if} 那些复杂的语法全都消失了；我们甚至不需要为 \texttt{else} 分支准备一个函数重载。现在，只需一个函数就能把富有表现力的代码包裹起来。\texttt{if constexpr} 会对条件求值，并且只有一个分支会被编译。在我们的例子中，如果某个类型能由给定的一组属性构造出来，那么我们就会编译对 \texttt{make\_unique} 的调用；否则就返回 \texttt{nullptr}（而 \texttt{make\_unique} 甚至不会被编译）。
+
+你可以在以下位置试玩这段代码：\texttt{Chapter If Constexpr Factory/variable\_factory.cpp}
+
+\section{小结}
+
+在本章中，你已经看到 \texttt{if constexpr} 如何让代码变得清晰得多、也更具表现力。在 C++17 之前，你可以使用 \texttt{enable\_if} 技术（\texttt{SFINAE}）或标签分派（tag dispatching）。这些方案通常会生成复杂的代码，初学者以及不熟悉元编程的专家都很难读懂。\texttt{if constexpr} 降低了有效编写模板代码所需的专业门槛。

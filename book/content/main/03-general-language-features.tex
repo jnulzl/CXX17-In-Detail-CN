@@ -1,0 +1,622 @@
+读完讲解语言修复与澄清的章节后，我们现在准备来看一些覆盖面更广的特性。本节描述的这些改进，也有可能让你的代码更紧凑、更具表现力。
+
+例如，借助结构化绑定，你可以用简洁得多的语法来处理元组（以及类元组表达式）。那些在其他语言（如 Python）中很容易做到的事，在老牌的 C++ 里也同样能实现了！
+
+本章你将学到：
+
+\begin{itemize}
+\item 结构化绑定 / 分解声明（Decomposition declarations）
+\item 如何为自定义类提供结构化绑定接口
+\item if/switch 的初始化语句（Init-statement）
+\item 内联变量及其对仅含头文件（header-only）库的影响
+\item 可在 constexpr 上下文中使用的 lambda 表达式
+\item 嵌套命名空间的简化用法
+\end{itemize}
+
+\section{结构化绑定声明}
+
+你是否经常使用元组或 pair？
+
+如果没有，你大概应该开始关注这些好用的类型了。元组让你能够借助良好的标准库支持，按需临时打包数据，而不必为每件事都创建自己的类型或使用输出参数。而像结构化绑定这样的语言支持，也让它们用起来更顺手。
+
+考虑一个以 pair 返回两个结果的函数：
+
+\begin{codebox}[cpp]
+std::pair<int, bool> InsertElement(int el) { ... }
+\end{codebox}
+
+你可以使用 \texttt{auto ret = InsertElement(...)}，然后引用 \texttt{ret.first} 或 \texttt{ret.second}。
+
+另外，你也可以使用 \texttt{std::tie}，它会把元组 / pair 解包到自定义变量中：
+
+\begin{codebox}[cpp]
+int index { 0 };
+bool flag { false };
+std::tie(index, flag) = InsertElement(10);
+\end{codebox}
+
+当你使用 \texttt{std::set::insert}（它返回 \texttt{std::pair}）时，这样的代码会很有用：
+
+\begin{codebox}[cpp]
+std::set<int> mySet;
+std::set<int>::iterator iter;
+bool inserted;
+std::tie(iter, inserted) = mySet.insert(10);
+if (inserted)
+std::cout << "Value was inserted\n";
+\end{codebox}
+
+在 C++17 中，代码可以更紧凑：
+
+\begin{codebox}[cpp]
+std::set<int> mySet;
+auto [iter, inserted] = mySet.insert(10);
+\end{codebox}
+
+现在，你不必再用 \texttt{pair.first} 和 \texttt{pair.second}，而是可以使用具有具体名字的变量。此外，你只需一行而非三行，代码也更易读。代码也更安全，因为 \texttt{iter} 和 \texttt{inserted} 是在表达式中初始化的。
+
+这种语法被称为结构化绑定表达式。
+
+\subsection{语法}
+
+基本语法如下：
+
+\begin{codebox}[cpp]
+auto [a, b, c, ...] = expression;
+auto [a, b, c, ...] { expression };
+auto [a, b, c, ...] ( expression );
+\end{codebox}
+
+编译器会把 \texttt{a}、\texttt{b}、\texttt{c}、\ldots 列表中的所有标识符引入到外围作用域中作为名字，并把它们绑定到 \texttt{expression} 所表示对象的子对象或元素上。
+
+在底层，编译器可能会生成如下伪代码：
+
+\begin{codebox}[cpp]
+auto tempTuple = expression;
+using a = tempTuple.first;
+using b = tempTuple.second;
+using c = tempTuple.third;
+\end{codebox}
+
+从概念上讲，\texttt{expression} 被复制到一个类元组对象（\texttt{tempTuple}）中，其成员变量通过 \texttt{a}、\texttt{b}、\texttt{c} 暴露出来。不过，变量 \texttt{a}、\texttt{b}、\texttt{c} 并不是引用，它们是隐藏对象成员变量的别名（或者说绑定）。这个临时对象有一个由编译器指定的唯一名字。
+
+例如：
+
+\begin{codebox}[cpp]
+std::pair a(0, 1.0f);
+auto [x, y] = a;
+\end{codebox}
+
+\texttt{x} 绑定到隐藏对象（它是 \texttt{a} 的副本）中存储的 \texttt{int}。类似地，\texttt{y} 绑定到 \texttt{float}。
+
+\paragraph{修饰符}
+
+结构化绑定可以使用以下几种修饰符：
+
+\texttt{const} 修饰符：
+
+\begin{codebox}[cpp]
+const auto [a, b, c, ...] = expression;
+\end{codebox}
+
+引用：
+
+\begin{codebox}[cpp]
+auto& [a, b, c, ...] = expression;
+auto&& [a, b, c, ...] = expression;
+\end{codebox}
+
+例如：
+
+\begin{codebox}[cpp]
+std::pair a(0, 1.0f);
+auto& [x, y] = a;
+x = 10;
+// 写访问
+// a.first 现在为 10
+\end{codebox}
+
+在上例中，\texttt{x} 绑定到隐藏对象中的元素，而该隐藏对象是对 \texttt{a} 的引用。
+
+如今，获取元组成员的引用也相当容易：
+
+\begin{codebox}[cpp]
+auto& [ refA, refB, refC, refD ] = myTuple;
+\end{codebox}
+
+你还可以添加属性（\texttt{\texttt{\texttt{[[attribute]]}}}）：
+
+\begin{codebox}[cpp]
+[[maybe_unused]] auto& [a, b, c, ...] = expression;
+\end{codebox}
+
+\paragraph{结构化绑定还是分解声明？}
+
+对于这个特性，你可能见过另一个名字“分解声明”（decomposition declaration）被使用。在标准制定过程中，这两个名字都曾被考虑过，但最终版本确定使用“结构化绑定”。
+
+\paragraph{结构化绑定声明不能被声明为 constexpr}
+
+有一条限制值得记住。
+
+\begin{codebox}[cpp]
+constexpr auto [x, y] = std::pair(0, 0);
+\end{codebox}
+
+这会生成如下错误：
+
+\begin{codebox}
+error: structured binding declaration cannot be 'constexpr'
+\end{codebox}
+
+这个限制可能在 C++20 中由提案 P1481\footnote{\url{https://wg21.link/P1481}} 解决。
+
+\subsection{绑定}
+
+结构化绑定并不局限于元组，我们可以从以下三种情况中绑定：
+
+1. 如果初始化器是一个数组：
+
+\begin{codebox}[cpp]
+// 适用于数组：
+double myArray[3] = { 1.0, 2.0, 3.0 };
+auto [a, b, c] = myArray;
+\end{codebox}
+
+在这种情况下，数组被复制到一个临时对象中，\texttt{a}、\texttt{b}、\texttt{c} 引用数组中被复制的元素。
+
+标识符的数量必须与数组中元素的数量相匹配。
+
+2. 如果初始化器支持 \texttt{std::tuple\_size<>} 并提供 \texttt{get<N>()} 与 \texttt{std::tuple\_element} 函数：
+
+\begin{codebox}[cpp]
+std::pair myPair(0, 1.0f);
+auto [a, b] = myPair; // 绑定 myPair.first/second
+\end{codebox}
+
+在上面这段代码片段中，我们绑定到 \texttt{myPair}。但这也意味着，只要为你的类添加 \texttt{get<N>} 接口的实现，就可以让它支持结构化绑定。示例请见后文。
+
+3. 如果初始化器的类型只包含非静态、公开的成员：
+
+\begin{codebox}[cpp]
+struct Point
+{
+double x;
+double y;
+};
+Point GetStartPoint() {
+return { 0.0, 0.0 };
+}
+const auto [x, y] = GetStartPoint();
+\end{codebox}
+
+\texttt{x} 和 \texttt{y} 引用 \texttt{Point} 结构体中 \texttt{Point::x} 和 \texttt{Point::y}。
+
+该类不必是 POD，但标识符的数量必须等于非静态数据成员的数量。
+
+注意：在 C++17 中，只要类成员是公开的，你就可以用结构化绑定来绑定到类成员。当你想在类的实现中访问私有成员时，这可能会成为问题。C++20 应该会修复这个问题。参见 P0969R0\footnote{\url{https://wg21.link/P0969R0}}。
+
+\subsection{示例}
+
+最酷的用例之一——在基于范围的 for 循环中绑定：
+
+\begin{codebox}[cpp]
+std::map<KeyType, ValueType> myMap;
+for (const auto & [key,val] : myMap)
+{
+// 使用 key/value，而不是 iter.first/iter.second
+}
+\end{codebox}
+
+在上例中，我们绑定到一对 [\texttt{key}, \texttt{val}]，于是可以在循环中使用这些名字。在 C++17 之前，你只能操作 map 的迭代器——它是一个 \texttt{pair<first, second>}。使用真实的名字 \texttt{key/value} 更具表现力。
+
+上述技巧可用于如下代码：
+
+\begin{codebox}[cpp]
+#include <map>
+#include <iostream>
+#include <string>
+int main()
+{
+const std::map<std::string, int> mapCityPopulation {
+{ "Beijing", 21'707'000 },
+{ "London", 8'787'892 },
+{ "New York", 8'622'698 }
+};
+for (auto&[city, population] : mapCityPopulation)
+std::cout << city << ": " << population << '\n';
+}
+\end{codebox}
+
+在循环体中，你可以安全地使用 \texttt{city} 和 \texttt{population} 变量。
+
+\paragraph{为自定义类提供结构化绑定接口}
+
+如前所述，你可以为自定义类提供结构化绑定支持。为此，你必须针对你的类型定义 \texttt{get<N>}、\texttt{std::tuple\_size} 和 \texttt{std::tuple\_element} 的特化。
+
+例如，如果你有一个包含三个成员的类，但只想暴露它的公开接口：
+
+\begin{codebox}[cpp]
+class UserEntry {
+public:
+void Load() { }
+std::string GetName() const { return name; }
+unsigned GetAge() const { return age; }
+private:
+std::string name;
+unsigned age { 0 };
+size_t cacheEntry { 0 }; // 未暴露
+};
+\end{codebox}
+
+结构化绑定的接口如下：
+
+\begin{codebox}[cpp]
+// 使用 if constexpr：
+template <size_t I> auto get(const UserEntry& u) {
+if constexpr (I == 0) return u.GetName();
+else if constexpr (I == 1) return u.GetAge();
+}
+namespace std {
+template <> struct tuple_size<UserEntry> : std::integral_constant<size_t, 2> { };
+template <> struct tuple_element<0,UserEntry> { using type = std::string; };
+template <> struct tuple_element<1,UserEntry> { using type = unsigned; };
+}
+\end{codebox}
+
+\texttt{tuple\_size} 指明有多少个字段可用，\texttt{tuple\_element} 定义某个特定元素的类型，而 \texttt{get<N>} 返回对应的值。
+
+此外，你也可以不使用 if constexpr，而是使用显式的 \texttt{get<>} 特化：
+
+\begin{codebox}[cpp]
+template<> string get<0>(const UserEntry &u)
+{ return u.GetName(); }
+template<> unsigned get<1>(const UserEntry &u) { return u.GetAge(); }
+\end{codebox}
+
+对许多类型来说，写两个（或若干个）函数可能比使用 if constexpr 更简单。
+
+现在你可以在结构化绑定中使用 \texttt{UserEntry}，例如：
+
+\begin{codebox}[cpp]
+UserEntry u;
+u.Load();
+auto [name, age] = u; // 只读访问
+std:: cout << name << ", " << age << '\n';
+\end{codebox}
+
+这个例子只允许对类进行只读访问。如果你想要写访问，那么类还应当提供返回成员引用的访问器。之后你还必须实现支持引用的 \texttt{get}。
+
+如你所见，\texttt{if constexpr} 被用来实现 \texttt{get<N>} 函数，更多内容请阅读 if constexpr 一章。
+
+\begin{myInfoBox}
+这一改动由以下提案提出：P0217\footnote{\url{https://wg21.link/p0217}}（措辞）、P0144\footnote{\url{https://wg21.link/p0144}}（理由与示例）、P0615\footnote{\url{https://wg21.link/p0615}}（将“分解声明”更名为“结构化绑定声明”）。
+\end{myInfoBox}
+
+\section{if 和 switch 的初始化语句}
+
+C++17 为 \texttt{if} 和 \texttt{switch} 语句提供了新的形式：\texttt{if (init; condition)} 和 \texttt{switch (init; condition)}。
+
+在 init 部分，你可以声明一个新变量，然后在 condition 部分检查它。该变量只在 if/else 作用域内可见。
+
+为了达到类似的效果，在 C++17 之前你必须这样写：
+
+\begin{codebox}[cpp]
+{
+auto val = GetValue();
+if (condition(val))
+// 成功时
+else
+// 为假时……
+}
+\end{codebox}
+
+请注意，\texttt{val} 拥有独立的作用域，否则它会“泄漏”到外围作用域。
+
+现在，在 C++17 中，你可以这样写：
+
+\begin{codebox}[cpp]
+if (auto val = GetValue(); condition(val))
+// 成功时
+else
+// 为假时……
+\end{codebox}
+
+现在，\texttt{val} 只在 \texttt{if} 和 \texttt{else} 语句内部可见，因此它不会“泄漏”。condition 可以是任何布尔条件。
+
+这有什么用？
+
+假设你想在一个字符串中查找几项内容：
+
+\begin{codebox}[cpp]
+const std::string myString = "My Hello World Wow";
+const auto pos = myString.find("Hello");
+if (pos != std::string::npos)
+std::cout << pos << " Hello\n"
+const auto pos2 = myString.find("World");
+if (pos2 != std::string::npos)
+std::cout << pos2 << " World\n"
+\end{codebox}
+
+你必须为 \texttt{pos} 使用不同的名字，或者把它用独立的作用域包裹起来：
+
+\begin{codebox}[cpp]
+{
+const auto pos = myString.find("Hello");
+if (pos != std::string::npos)
+std::cout << pos << " Hello\n"
+}
+{
+const auto pos = myString.find("World");
+if (pos != std::string::npos)
+std::cout << pos << " World\n"
+}
+\end{codebox}
+
+新的 \texttt{if} 语句可以把那个额外的作用域写在一行里：
+
+\begin{codebox}[cpp]
+if (const auto pos = myString.find("Hello"); pos != std::string::npos)
+std::cout << pos << " Hello\n";
+if (const auto pos = myString.find("World"); pos != std::string::npos)
+std::cout << pos << " World\n";
+\end{codebox}
+
+如前所述，在 \texttt{if} 语句中定义的变量在 \texttt{else} 块中也可见。因此你可以这样写：
+
+\begin{codebox}[cpp]
+if (const auto pos = myString.find("World"); pos != std::string::npos)
+std::cout << pos << " World\n";
+else
+std::cout << pos << " not found!!\n";
+\end{codebox}
+
+此外，你可以把它与结构化绑定一起使用（参考 Herb Sutter 的代码\footnote{\url{https://herbsutter.com/2016/06/30/trip-report-summer-iso-c-standards-meeting-oulu/}}）：
+
+\begin{codebox}[cpp]
+// 强强联合：结构化绑定 + if 初始化语句
+if (auto [iter, succeeded] = mymap.insert(value); succeeded) {
+use(iter);
+// 正常
+// ...
+} // iter 和 succeeded 在此处被销毁
+\end{codebox}
+
+\begin{myInfoBox}
+这一改动由提案 P0305R1\footnote{\url{http://wg21.link/p0305r1}} 提出。
+\end{myInfoBox}
+
+\section{内联变量}
+
+借助 C++11 引入的“非静态数据成员初始化”（Non-Static Data Member Initialisation），你现在可以在一处声明并初始化成员变量：
+
+\begin{codebox}[cpp]
+class User
+{
+int _age {0};
+std::string _name {"unknown"};
+};
+\end{codebox}
+
+不过，对于静态变量（或 const static），你通常还是需要在某个 cpp 文件中定义它。
+
+C++11 的 \texttt{constexpr} 关键字允许你在同一处声明并定义静态变量，但它仅限于常量表达式。
+
+以前，只有方法 / 函数可以被指定为 inline，但现在你可以在头文件里对变量做同样的事。
+
+提案 P0386R2\footnote{\url{http://wg21.link/p0386r2}} 中写道：声明为 inline 的变量与声明为 inline 的函数具有相同的语义：它可以在多个翻译单元中以完全相同的方式定义，必须在每个使用它的翻译单元中定义，而程序的行为就如同恰好只有一个变量。
+
+例如：
+
+\begin{codebox}[cpp]
+// 在头文件中：
+struct MyClass
+{
+static const int sValue;
+};
+// 稍后在同一头文件中：
+inline int const MyClass::sValue = 777;
+\end{codebox}
+
+甚至可以在一处完成声明与定义：
+
+\begin{codebox}[cpp]
+struct MyClass
+{
+inline static const int sValue = 777;
+};
+\end{codebox}
+
+另外请注意，\texttt{constexpr} 变量隐式就是 inline 的，因此没必要写成 \texttt{constexpr inline myVar = 10;}。
+
+内联变量也比 \texttt{constexpr} 变量更灵活，因为它不必用常量表达式初始化。例如，你可以用 \texttt{rand()} 来初始化内联变量，但对 \texttt{constexpr} 变量却做不到同样的事。
+
+\subsection{它如何精简代码？}
+
+许多仅含头文件的库可以减少各种 hack（例如使用 inline 函数或模板），转而使用内联变量。
+
+例如：
+
+\begin{codebox}[cpp]
+class MyClass
+{
+static inline int Seed(); // 静态方法
+};
+inline int MyClass::Seed() {
+static const int seed = rand();
+return seed;
+}
+\end{codebox}
+
+可以改写为：
+
+\begin{codebox}[cpp]
+class MyClass
+{
+static inline int seed = rand();
+};
+\end{codebox}
+
+C++17 保证 \texttt{MyClass::seed} 在所有编译单元中都拥有相同的值（在运行时生成）！
+
+\begin{myInfoBox}
+这一改动由提案 P0386R2\footnote{\url{http://wg21.link/p0386r2}} 提出。
+\end{myInfoBox}
+
+\section{constexpr Lambda 表达式}
+
+Lambda 表达式在 C++11 中引入，自那时起就成为现代 C++ 不可或缺的一部分。C++11 的另一个重要特性是“常量表达式”（constant expressions）——主要用 \texttt{constexpr} 声明。在 C++17 中，这两样东西被允许共存——于是你的 lambda 可以在常量表达式上下文中被调用。
+
+在 C++11/14 中，下面的代码无法编译：
+
+\begin{codebox}[cpp]
+auto SimpleLambda = [] (int n)
+{ return n; };
+static_assert(SimpleLambda(3) == 3, "");
+\end{codebox}
+
+使用 \texttt{-std=c++11} 标志编译的 GCC 报告如下错误：
+
+\begin{codebox}
+error: call to non-'constexpr' function 'main()::<lambda(int)>'
+static_assert(SimpleLambda(3) == 3, "");
+\end{codebox}
+
+然而，使用 \texttt{-std=c++17} 时这段代码就能编译了！这是因为自 C++17 起，符合标准 \texttt{constexpr} 函数规则的 lambda 表达式会被隐式声明为 \texttt{constexpr}。
+
+这意味着什么？有哪些限制？
+
+引用标准——10.1.5 constexpr 说明符 [dcl.constexpr]
+
+\begin{myQuote}
+constexpr 函数的定义应满足以下要求：
+
+\begin{itemize}
+\item 它不能是虚函数（13.3）；
+\item 其返回类型应是字面量类型（literal type）；其每个形参类型也应是字面量类型；
+\item 其函数体应是 \texttt{= delete}、\texttt{= default}，或是以下不包含任何内容的复合语句（compound-statement）：
+  \begin{itemize}
+  \item 汇编定义（asm-definition），
+  \item goto 语句，
+  \item 标识符标号（identifier label，9.1），
+  \item try 块，
+  \item 或对非字面量类型的变量、具有静态或线程存储期的变量、或没有执行初始化的变量的定义。
+  \end{itemize}
+\end{itemize}
+\end{myQuote}
+
+实际上，如果你希望函数或 lambda 在编译期执行，那么该函数的函数体不应调用任何非 constexpr 的代码。例如，你不能动态地分配内存。
+
+Lambda 也可以被显式声明为 constexpr：
+
+\begin{codebox}[cpp]
+auto SimpleLambda = [] (int n) constexpr { return n; };
+\end{codebox}
+
+而如果你违反了 constexpr 函数的规则，就会得到一个编译期错误。
+
+\begin{codebox}[cpp]
+auto FaultyLeakyLambda = [] (int n) constexpr {
+int *p = new int(10);
+return n + (*p);
+};
+\end{codebox}
+
+\texttt{operator new} 不是 constexpr 的，因此这段代码无法编译。
+
+constexpr lambda 将成为一个很棒的特性，尤其当它与 C++20 即将引入的 constexpr 标准算法结合使用时。
+
+\begin{myInfoBox}
+这一改动由提案 P0170\footnote{\url{http://wg21.link/p0170}} 提出。
+\end{myInfoBox}
+
+\section{嵌套命名空间}
+
+命名空间允许把类型和函数划分为独立的逻辑单元。
+
+例如，通常会看到库 XY 里的每个类型或函数都存放在命名空间 \texttt{xy} 中。如下例所示，其中有一个 \texttt{SuperCompressionLib}，它暴露了名为 \texttt{Compress()} 和 \texttt{Decompress()} 的函数：
+
+\begin{codebox}[cpp]
+namespace SuperCompressionLib {
+bool Compress();
+bool Decompress();
+}
+\end{codebox}
+
+如果你有两个或更多嵌套的命名空间，事情就变得有意思了。
+
+\begin{codebox}[cpp]
+namespace MySuperCompany {
+namespace SecretProject {
+namespace SafetySystem {
+class SuperArmor {
+// ...
+};
+class SuperShield {
+// ...
+};
+} // SafetySystem
+} // SecretProject
+} // MySuperCompany
+\end{codebox}
+
+借助 C++17，嵌套命名空间可以用更紧凑的方式书写：
+
+\begin{codebox}[cpp]
+namespace MySuperCompany::SecretProject::SafetySystem {
+class SuperArmor {
+// ...
+};
+class SuperShield {
+// ...
+};
+}
+\end{codebox}
+
+这种语法使用起来很顺手，对具有 C\# 或 Java 等语言经验的开发者来说也更容易上手。
+
+在 C++17 中，标准库也在几处借助这个新的嵌套命名空间特性进行了“压缩”：
+
+例如在 regex 上。
+
+在 C++17 中，它的定义如下：
+
+\begin{codebox}[cpp]
+namespace std::regex_constants {
+typedef T1 syntax_option_type;
+// ...
+}
+\end{codebox}
+
+在 C++17 之前，同样的内容声明如下：
+
+\begin{codebox}[cpp]
+namespace std {
+namespace regex_constants {
+typedef T1 syntax_option_type;
+// ...
+}
+}
+\end{codebox}
+
+上述嵌套声明出现在 C++ 规范中，但在具体的 STL 实现中看起来可能有所不同。
+
+\begin{myInfoBox}
+这一改动由提案 N4230\footnote{\url{http://wg21.link/N4230}} 提出。
+\end{myInfoBox}
+
+\section{编译器支持}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+结构化绑定声明 & 7.0 & 4.0 & VS 2017 15.3 \\
+if/switch 的初始化语句 & 7.0 & 3.9 & VS 2017 15.3 \\
+内联变量 & 7.0 & 3.9 & VS 2017 15.5 \\
+constexpr Lambda 表达式 & 7.0 & 5.0 & VS 2017 15.3 \\
+嵌套命名空间 & 6.0 & 3.6 & VS 2015 \\
+\bottomrule
+\end{tabularx}
+\end{table}

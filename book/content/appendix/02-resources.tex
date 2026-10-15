@@ -1,0 +1,119 @@
+首先，如果你想自己深入研究标准，可以在这里阅读最新的草案：N4687（2017-07-30 工作草案，《C++ 编程语言标准》——来自 isocpp.org）。这是标准获得正式通过前的最后一份草案，因此几乎等同于最终规范。此外，关于各项提案及其状态的更多信息，也可以查看 isocpp : Standard C++。若想快速了解 C++17 的变更，有一篇提案值得一看：P0636——C++14 与 C++17 之间的差异。
+
+\section{书籍}
+
+\begin{itemize}
+\item 《C++17 完全指南》（\emph{C++17 - The Complete Guide}），Nicolai Josuttis 著。
+\item 《C++17 STL 食谱》（\emph{C++17 STL Cookbook}），Jacek Galowicz 著。
+\item 《现代 C++ 编程食谱》（\emph{Modern C++ Programming Cookbook}），Marius Bancila 著。
+\item 《C++ 模板：完全指南（第 2 版）》（\emph{C++ Templates: The Complete Guide (2nd Edition)}），David Vandevoorde、Nicolai M. Josuttis、Douglas Gregor 著。
+\item 《专业 C++（第 4 版）》（\emph{Professional C++, 4th Edition}），Marc Gregoire 著。
+\end{itemize}
+
+\section{通用 C++ 链接}
+
+\begin{itemize}
+\item 编译器支持：C++ 编译器支持（cppreference）。
+\item 记录变更的官方提案：P0636r0——C++14 与 C++17 DIS 之间的差异。
+\item Jason Turner：C++ Weekly 频道，他几乎（甚至全部）讲解了 C++17 的各项特性。
+\item Simon Brand 的博客——包含大量关于 C++17 的信息。
+\item Arne Mertz 的博客。
+\item Rainer Grimm 的博客。
+\item CppCast（播客）。
+\item FluentC++（博客）。
+\end{itemize}
+
+\section{C++17 通用语言特性}
+
+\begin{itemize}
+\item Simon Brand：类模板构造函数的模板实参推导。
+\item 类模板推导（自 C++17 起）——cppreference。
+\item 《现代 C++ 编程食谱》中“使用折叠表达式简化可变参数函数模板”一节。
+\item Simon Brand：用折叠表达式拆解元组（Exploding tuples with fold expressions）。
+\item Baptiste Wicht：C++17 折叠表达式（C++17 Fold Expressions）。
+\item 折叠表达式——ModernesCpp.com。
+\item 为你的类添加 C++17 结构化绑定（structured bindings）支持。
+\item C++ Weekly 特别篇——使用 C++17 的 \texttt{if constexpr}（YouTube）——来自 Jason 及其项目的真实示例。
+\item C++17：让我们看看 \texttt{if constexpr}——FJ。
+\item C++17 vs. C++14——\texttt{if constexpr}——LoopPerfect（Medium）。
+\item MSVC 现已支持两阶段名字查找（two-phase name lookup）。
+\item \texttt{carries\_dependency} 属性的含义是什么？——Stack Overflow。
+\item C++17 中的值类别（Value Categories）——Barry Revzin（Medium）。
+\item 右值被重新定义（Rvalues redefined）——Andrzej 的 C++ 博客。
+\end{itemize}
+
+\section{表达式求值顺序}
+
+\begin{itemize}
+\item GotW \#56：异常安全的函数调用。
+\item 核心指南：ES.43——避免求值顺序未定义的表达式。
+\item 核心指南：ES.44——不要依赖函数实参的求值顺序。
+\end{itemize}
+
+\section{关于 std::optional}
+
+\begin{itemize}
+\item Andrzej 的 C++ 博客：高效的 optional 值（Efficient optional values）。
+\item Andrzej 的 C++ 博客：引用限定符（Ref-qualifiers）。
+\item 用 \texttt{optional<T>} 让接口更清晰——Fluent C++。
+\item Optional——性能考量——Boost 1.67.0。
+\item C++17 中对值语义（Value Semantics）的增强支持——Michael Park，CppCon 2017。
+\item std::optional：如何、何时、为何使用——Visual C++ 团队博客。
+\end{itemize}
+
+\section{关于 std::variant}
+
+\begin{itemize}
+\item SimplifyC++——Overload：即时构建 Variant 访问器（Build a Variant Visitor on the Fly）。
+\item Variant 访问（Variant Visitation）——Michael Park。
+\item C++17 中的和类型（sum types）与状态机。
+\item 用 \texttt{std::variant} 实现状态机。
+\item C++17 中使用 \texttt{std::variant}、\texttt{std::monostate} 与 \texttt{std::visit} 进行模式匹配。
+\item 另一种多态——Andrzej 的 C++ 博客。
+\item 继承 vs \texttt{std::variant}——C++ Truths。
+\end{itemize}
+
+\section{关于 \texttt{string\_view}}
+
+\begin{itemize}
+\item CppCon 2015：string\_view——Marshall Clow。
+\item string\_view odi et amo——Marco Arena。
+\item C++17 string\_view——Steve Lorimer。
+\item ModernesCpp——string\_view。
+\item foonathan::blog()——\texttt{std::string\_view} 接受临时对象：好主意还是可怕的陷阱？
+\item abseil / Tip of the Week \#1：string\_view。
+\item \texttt{std::string\_view} 是一种借用类型（borrow type）——Arthur O'Dwyer——Stuff mostly about C++。
+\item C++ Russia 2018：Victor Ciura，足够把自己吊死的 string\_view（Enough string\_view to hang ourselves）——YouTube。
+\item StringViews, StringViews everywhere!——Marc Mutz——Meeting C++ 2017——YouTube。
+\item Jacek 的 C++ 博客·指向临时对象的常量引用（Const References to Temporary Objects）。
+\item abseil / Tip of the Week \#107：引用生命期延长（Reference Lifetime Extension）。
+\item C++17——用 \texttt{std::string\_view} 避免拷贝——ModernesCpp.com。
+\end{itemize}
+
+\section{字符串转换与搜索器}
+
+\begin{itemize}
+\item 如何在 C++ 中将字符串转换为 int——Fluent C++。
+\item 如何在 C++ 中高效地将字符串转换为 int——Fluent C++。
+\item 如何以 2 比特编码一个字符？——Stack Overflow。
+\end{itemize}
+
+\section{关于文件系统}
+
+\begin{itemize}
+\item 《现代 C++ 编程食谱》第 7 章“使用文件与流”（Working with Files and Streams）。
+\item 示例包括：使用文件系统路径、创建/复制/删除文件与目录、从文件中移除内容、检查已有文件或目录的属性、搜索。
+\item 《C++17 STL 食谱》第 10 章“文件系统”（Filesystem）。
+\item 示例包括：路径规范化器（path normalizer）、实现类 grep 的文本搜索工具、实现自动文件重命名器、实现磁盘用量计数器、文件类型统计、实现用符号链接替换重复文件来缩减文件夹体积的工具。
+\item C++17——\texttt{std::byte} 与 \texttt{std::filesystem}——ModernesCpp.com。
+\item Boost 文件系统与标准 C++ 文件系统的相似度有多高？——Stack Overflow。
+\end{itemize}
+
+\section{并行算法}
+
+\begin{itemize}
+\item Bryce Adelstein 关于并行算法的演讲，包含大量 map reduce（transform reduce）算法的示例：CppCon 2016——Bryce Adelstein Lelbach“C++17 并行算法库及展望”——YouTube。
+\item Sean Parent 关于 C++ 更好并发性的演讲：code::dive 2016 大会——Sean Parent——Better Code: Concurrency——YouTube。
+\item Simon Brand——\texttt{std::accumulate} vs. \texttt{std::reduce}。
+\item 使用 C++17 并行算法提升性能——Visual C++ 团队博客。
+\end{itemize}

@@ -1,0 +1,164 @@
+如果你使用的是 GCC、Clang 或 MSVC 的最新版本，可能会认为 C++17 已经得到完整支持（标准库实现的某些部分除外）。GCC 在 7.0 版本中实现了完整支持，Clang 在 6.0 版本中实现，而 MSVC 自 VS 2017 15.7 起符合标准。为了完整起见，下面列出了各特性及其被加入的编译器版本。
+
+随时了解各特性支持状态的主要资源是：CppReference — 编译器支持\footnote{\url{https://en.cppreference.com/w/cpp/compiler_support}}。
+
+\section{GCC}
+
+\begin{itemize}
+\item 语言\footnote{\url{https://gcc.gnu.org/projects/cxx-status.html\#cxx17}}
+\item 标准库 — LibSTDC++\footnote{\url{https://gcc.gnu.org/onlinedocs/libstdc++/manual/status.html\#status.iso.2017}}
+\end{itemize}
+
+\section{Clang}
+
+\begin{itemize}
+\item 语言\footnote{\url{http://clang.llvm.org/cxx_status.html\#cxx17}}
+\item 标准库 — LibC++\footnote{\url{http://libcxx.llvm.org/cxx1z_status.html}}
+\end{itemize}
+
+\section{VisualStudio - MSVC}
+
+\begin{itemize}
+\item 公告：MSVC 符合 C++ 标准\footnote{\url{https://blogs.msdn.microsoft.com/vcblog/2018/05/07/announcing-msvc-conforms-to-the-c-standard/}}
+\end{itemize}
+
+\section{C++17 特性编译器支持}
+
+\subsection{修复与弃用}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+Removing register keyword & 7.0 & 3.8 & VS 2017 15.3 \\
+Remove Deprecated operator++(bool) & 7.0 & 3.8 & VS 2017 15.3 \\
+Removing Deprecated Exception Specifications & 7.0 & 4.0 & VS 2017 15.5 \\
+Removing auto\_ptr, random\_shuffle, old <functional> & No (kept for compatibility) & not yet & VS 2015 \\
+Removing trigraphs & 5.1 & 3.5 & VS 2010 \\
+New auto rules for direct-list-initialisation & 5.0 & 3.8 & VS 2015 \\
+static\_assert with no message & 6.0 & 2.5 & VS 2017 \\
+Different begin and end types in range-based for & 6.0 & 3.6 & VS 2017 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{澄清}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+Stricter expression evaluation order & 7.0 & 4.0 & VS 2017 \\
+Guaranteed copy elision & 7.0 & 4.0 & VS 2017 15.6 \\
+Exception specifications part of the type system & 7.0 & 4.0 & VS 2017 15.5 \\
+Dynamic memory allocation for over-aligned data & 7.0 & 4.0 & VS 2017 15.5 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{通用语言特性}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+Structured Binding Declarations & 7.0 & 4.0 & VS 2017 15.3 \\
+Init-statement for if/switch & 7.0 & 3.9 & VS 2017 15.3 \\
+Inline variables & 7.0 & 3.9 & VS 2017 15.5 \\
+constexpr Lambda Expressions & 7.0 & 5.0 & VS 2017 15.3 \\
+Nested namespaces & 6.0 & 3.6 & VS 2015 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{模板}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+Template argument deduction for class templates & 7.0/8.0 & 5.0 & VS 2017 15.7 \\
+Deduction Guides in the Standard Library & 8.0 & 7.0/in progress & VS 2017 15.7 \\
+Declaring non-type template parameters with auto & 7.0 & 4.0 & VS 2017 15.7 \\
+Fold expressions & 6.0 & 3.9 & VS 2017 15.5 \\
+if constexpr & 7.0 & 3.9 & VS 2017 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+⁸ GCC 8.0 中为类模板实参推导加入了更多改进（P0512R0）。
+
+⁹ LibSTDC++ 的状态页未列出推导指引，因此可认为它们是作为类模板实参推导的一部分实现的。
+
+¹⁰ LibC++ 的状态页提到，目前 <string>、序列容器、容器适配器和 <regex> 部分已经实现。
+
+\subsection{属性}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+\texttt{\texttt{\texttt{[[fallthrough]]}}} & 7.0 & 3.9 & VS 2017 15.0 \\
+\texttt{\texttt{\texttt{[[nodiscard]]}}} & 7.0 & 3.9 & VS 2017 15.3 \\
+\texttt{\texttt{\texttt{[[maybe\_unused]]}}} & 7.0 & 3.9 & VS 2017 15.3 \\
+Attributes for namespaces and enumerators & 4.9(namespaces)/6(enums) & 3.4 & VS 2015 14.0 \\
+Ignore unknown attributes & yes & 3.9 & VS 2015 14.0 \\
+Using attribute namespaces without repetition & 7.0 & 3.9 & VS 2017 15.3 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{标准库}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+\texttt{std::optional} & 7.1 & 4.0 & VS 2017 15.0 \\
+\texttt{std::variant} & 7.1 & 4.0 & VS 2017 15.0 \\
+\texttt{std::any} & 7.1 & 4.0 & VS 2017 15.0 \\
+\texttt{std::string\_view} & 7.1 & 4.0 & VS 2017 15.0 \\
+String Searchers & 7.1 & 5.0 & VS 2017 15.3 \\
+String Conversions & 8 (only integral types) & in progress & Partial in VS 2017 15.7 \\
+Parallel Algorithms & in progress & in progress & VS 2017 15.7 \\
+Filesystem & 8.0 & in progress & VS 2017 15.7 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{标准库其他改动}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+\texttt{std::byte} & 7.1 & 5.0 & VS 2017 15.3 \\
+Improvements for Maps and Sets & 7.0 & 3.9 & VS 2017 15.5 \\
+\texttt{insert\_or\_assign()/try\_emplace()} for maps & 6.1 & 3.7 & VS 2017 15 \\
+Emplace Return Type & 7.1 & 4.0 & VS 2017 15.3 \\
+Sampling algorithms & 7.1 & In Progress & VS 2017 15 \\
+gcd and lcm & 7.1 & 4.0 & VS 2017 15.3 \\
+clamp & 7.1 & 3.9 & VS 2015.3 \\
+Special Mathematical Functions & 7.1 & Not yet & VS 2017 15.7 \\
+Shared Pointers and Arrays & 7.1 & In Progress & VS 2017 15.5 \\
+Non-member size(), data() and empty() & 6.1 & 3.6 & VS 2015 \\
+constexpr Additions to the Standard Library & 7.1 & 4.0 & VS 2017 15.3 \\
+\texttt{scoped\_lock} & 7.1 & 5.0 & VS 2017 15.3 \\
+Polymorphic Allocator \& Memory Resource & 9.1 & In Progress & VS 2017 15.6 \\
+\bottomrule
+\end{tabularx}
+\end{table}

@@ -1,0 +1,881 @@
+% stub
+
+自 C++11 引入移动语义以来，传递字符串变得快了许多。然而你仍可能遇到大量临时的字符串拷贝。在 C++17 中，你得到了一个名为 \texttt{string\_view} 的新类型。它允许你创建一个连续字符序列的、常量、非拥有的视图。你可以操作该视图并到处传递它，而无需拷贝被引用的数据。不过，这一特性也带来了一些代价：你需要小心避免产生“悬垂”的视图，而且通常这类视图可能并非以空字符结尾。
+
+本章你将学到：
+
+\begin{itemize}
+\item 什么是 \texttt{string\_view}？
+\item 它为何能加速你的代码？
+\item 使用 \texttt{string\_view} 对象有哪些风险？
+\item 什么是引用生命期延长，它对 \texttt{string\_view} 意味着什么？
+\item 如何借助 \texttt{string\_view} 让你的 API 更具泛型能力？
+\end{itemize}
+
+
+\section{基础}
+
+我们先做一个小实验：
+
+下面的例子会创建多少个字符串拷贝？
+
+\begin{codebox}[cpp]
+// string function:
+std::string StartFromWordStr(const std::string& strArg, const std::string& word)
+{
+return strArg.substr(strArg.find(word)); // substr creates a new string
+}
+// call:
+std::string str {"Hello Amazing Programming Environment" };
+auto subStr = StartFromWordStr(str, "Programming Environment");
+std::cout << subStr << '\n';
+\end{codebox}
+
+你能把它们都数出来吗？
+
+答案是 3 个或 5 个，取决于编译器；但通常应该是 3 个。
+
+\begin{itemize}
+\item 第一个是为 \texttt{str} 创建的。
+\item 第二个是 \texttt{StartFromWordStr} 的第二个参数——该参数类型是 \texttt{const string\&}，由于我们传入的是 \texttt{const char*}，它会创建一个新的字符串。
+\item 第三个来自 \texttt{substr}，它返回一个新的字符串。
+\item 此外，当对象从函数返回时，可能还会再多出一两个拷贝。
+\end{itemize}
+
+不过通常编译器能够优化并消除这些拷贝（尤其是自 C++17 起，那种情况下拷贝消除已成为强制要求）。
+
+\begin{itemize}
+\item 如果字符串较短，那么由于小字符串优化¹，可能根本不会发生堆分配。
+\end{itemize}
+
+上面的例子是经过简化的。然而你可以想象一下生产环境中的代码：字符串操作频繁发生，那种场景下，编译器创建的所有临时对象连数都很难数清。
+
+解决临时拷贝问题的一个更好的做法是使用 \texttt{std::string\_view}。顾名思义，你拿到的不再是原始字符串本身，而只是它的一个非拥有视图。大多数情况下，它只是一个指向连续字符序列的指针加上一个长度。你可以到处传递它，并使用大多数常见的字符串操作。
+
+视图与 \texttt{substr} 这类字符串操作配合得很好。在典型情况下，每一次子串操作都会创建另一个更小的字符串拷贝；而使用 \texttt{string\_view} 时，\texttt{substr} 只是映射到原始缓冲区的不同部分，既不额外消耗内存，也不做动态分配。
+
+下面是我们代码的改写版本，它接受 \texttt{string\_view}：
+
+\footnotetext{¹ 小字符串优化（Small String Optimisation）并未在 C++ 标准中规定，但它是主流编译器普遍采用的优化。目前，MSVC（VS 2017）/GCC（8.1）下为 15 个字符，Clang（6.0）下为 22 个字符。}
+
+\begin{codebox}[cpp]
+// Chapter string_view/avoiding_copies_string_view.cpp
+std::string_view StartFromWord(std::string_view str, std::string_view word)
+{
+return str.substr(str.find(word)); // substr creates only a new view
+}
+// call:
+std::string str {"Hello Amazing Programming Environment"};
+auto subView = StartFromWord(str, "Programming Environment");
+std::cout << subView << '\n';
+\end{codebox}
+
+在上面的例子中，我们只有一次分配——只为那个主字符串 \texttt{str}。没有任何 \texttt{string\_view} 操作会为新的字符串触发拷贝或额外的内存分配。当然，\texttt{string\_view} 本身会被拷贝——但由于它只是一个指针加一个长度，这比拷贝整个字符串要高效得多。
+
+有一点警告：虽然这个例子展示了字符串视图的优化能力，但请继续往下读，看看这段代码所暗藏的风险与前提假设！或者你现在就已经能发现其中几个问题了？
+
+\subsection{何时使用}
+
+那么，你应当在什么时候使用 \texttt{string\_view}：
+
+\begin{itemize}
+\item 优化：你可以仔细审视自己的代码，把各种字符串操作替换成 \texttt{string\_view}。在大多数情况下，你最终会得到更快的代码以及更少的内存分配。
+\item 作为 \texttt{const std::string\&} 参数的潜在替代品——尤其是那些不需要拥有权、也不会保存该字符串的函数中。
+\item 处理来自其它 API 的字符串：\texttt{QString}、\texttt{CString}、\texttt{const char*}……只要内容是放在一段连续内存中、且具备基本的字符类型，都可以。你可以写一个接受 \texttt{string\_view} 的函数，而从那种其它实现转换过来时不会发生任何转换开销。
+\end{itemize}
+
+无论如何，有一点很重要：要记住它仅仅是一个非拥有视图，因此一旦原始对象不复存在，视图就变成了垃圾，你可能会陷入麻烦。
+
+此外，\texttt{string\_view} 可能不包含空终止符，所以你的代码也必须能应对这一点。例如，把一个 \texttt{string\_view} 传给一个接受以空字符结尾的字符串的函数，从来都不是个好主意。关于这一点，我们会在单独的一节——“使用 \texttt{string\_view} 的风险”——中详谈。
+
+\section{\texttt{std::basic\_string\_view} 类型}
+
+虽然我们谈论的是 \texttt{string\_view}，但有一点很重要：它其实只是一个模板类 \texttt{basic\_string\_view} 的特化：
+
+\begin{codebox}[cpp]
+template<
+class CharT,
+class Traits = std::char_traits<CharT>
+> class basic_string_view;
+\end{codebox}
+
+\texttt{Traits} 类用于抽象出针对字符类型的操作，例如如何比较字符、如何在一个序列中查找某个字符。
+
+这样的层级关系与 \texttt{std::string} 的情况类似——\texttt{std::string} 也是 \texttt{std::basic\_string} 的一个特化。
+
+我们有以下特化版本：
+
+\begin{codebox}[cpp]
+std::string_view
+std::basic_string_view<char>
+std::wstring_view
+std::basic_string_view<wchar_t>
+std::u16string_view
+std::basic_string_view<char16_t>
+std::u32string_view
+std::basic_string_view<char32_t>
+\end{codebox}
+
+如你所见，各特化版本使用了不同的底层字符类型。
+
+为了方便起见，本章余下部分只考虑 \texttt{string\_view}。
+
+\section{\texttt{std::string\_view} 的创建}
+
+你可以通过几种方式创建一个 \texttt{string\_view}：
+
+\begin{itemize}
+\item 从 \texttt{const char*}——提供一个指向以空字符结尾的字符串的指针；
+\item 从 \texttt{const char*} 加长度；
+\item 通过从 \texttt{std::string} 转换得到；
+\item 通过使用 \texttt{""sv} 字面量。
+\end{itemize}
+
+下面是各种创建方式的示例：
+
+\begin{codebox}[cpp]
+// Chapter string_view/string_view_creation.cpp
+const char* cstr = "Hello World";
+// the whole string:
+std::string_view sv1 { cstr };
+std::cout << sv1 << ", len: " << sv1.size() << '\n';
+// slice
+std::string_view sv2 { cstr, 5 }; // not null-terminated!
+std::cout << sv2 << ", len: " << sv2.size() << '\n';
+// from string:
+std::string str = "Hello String";
+std::string_view sv3 = str;
+std::cout << sv3 << ", len: " << sv3.size() << '\n';
+// ""sv literal
+using namespace std::literals;
+std::string_view sv4 = "Hello\0 Super World"sv;
+std::cout << sv4 << ", len: " << sv4.size() << '\n';
+std::cout << sv4.data() << " - till zero\n";
+\end{codebox}
+
+程序将输出：
+
+\begin{codebox}
+Hello World, len: 11
+Hello, len: 5
+Hello String, len: 12
+Hello Super World, len: 18
+Hello - till zero
+\end{codebox}
+
+请注意最后两行：\texttt{sv4} 在中间包含了一个 \texttt{'\textbackslash0'}，但 \texttt{std::cout} 仍然能把整个序列打印出来。在最后一行中，我们尝试用 \texttt{.data()} 来打印，而得到的是一个字符串指针，于是打印在遇到空终止符处就中断了。
+
+\section{其它操作}
+
+\texttt{string\_view} 被设计得与 \texttt{std::string} 非常相似。不过，由于视图是非拥有的，任何会修改数据的操作都不可能进入它的 API。下面是你可以配合这个新类型使用的方法的简要清单：
+
+\textbf{迭代器：}
+
+\begin{itemize}
+\item \texttt{cbegin()}/\texttt{begin()} / \texttt{crbegin()}/\texttt{rbegin()} —— 两者都是 const 且 constexpr；
+\item \texttt{cend()}/\texttt{end()} / \texttt{crend()}/\texttt{rend()} —— 两者都是 const 且 constexpr。
+\end{itemize}
+
+\textbf{访问元素：}
+
+\begin{itemize}
+\item \texttt{operator[]}
+\item \texttt{at}
+\item \texttt{front}
+\item \texttt{back}
+\item \texttt{data}
+\end{itemize}
+
+\textbf{大小与容量：}
+
+\begin{itemize}
+\item \texttt{size}/\texttt{length}
+\item \texttt{max\_size}
+\item \texttt{empty}
+\end{itemize}
+
+\textbf{修改器：}
+
+\begin{itemize}
+\item \texttt{remove\_prefix}
+\item \texttt{remove\_suffix}
+\item \texttt{swap}
+\end{itemize}
+
+\textbf{其它：}
+
+\begin{itemize}
+\item \texttt{copy}（不是 constexpr）
+\item \texttt{substr} —— 复杂度为 O(1)，而不像 \texttt{std::string} 中那样是 O(n)
+\item \texttt{compare}
+\item \texttt{find}
+\item \texttt{rfind}
+\item \texttt{find\_first\_of}
+\item \texttt{find\_last\_of}
+\item \texttt{find\_first\_not\_of}
+\item \texttt{find\_last\_not\_of}
+\item 用于字典序比较的运算符：\texttt{==}、\texttt{!=}、\texttt{<=}、\texttt{>=}、\texttt{<}、\texttt{>}
+\item 用于 \texttt{ostream} 输出的 \texttt{operator<<}
+\item 针对 \texttt{std::hash} 的特化
+\end{itemize}
+
+关于上述操作，有几件关键的事：
+
+\begin{itemize}
+\item 上述所有方法（除 \texttt{copy}、\texttt{operator<<} 以及 \texttt{std::hash} 的特化之外）也都被标记为 constexpr！借助这一能力，你现在可以在常量表达式中处理连续的字符序列了。
+\item 上面的清单几乎与所有不可变的字符串操作一致。不过有两个新方法：\texttt{remove\_prefix} 和 \texttt{remove\_suffix}——它们不是 const 的，会修改 \texttt{string\_view} 对象本身。注意，它们仍然无法修改被引用的数据。
+\item \texttt{operator[]}、\texttt{at}、\texttt{front}、\texttt{back}、\texttt{data} 也都是 const 的——因此你无法更改底层字符序列（它只是“只读访问”）。在 \texttt{std::string} 中，这些方法有返回引用的重载版本——于是你获得的是“写访问”。这一点在 \texttt{string\_view} 上是不可能的。
+\end{itemize}
+
+\begin{myInfoBox}
+More in C++20!
+
+关于 C++20，我们至少还会得到两个新方法：
+
+\begin{itemize}
+\item \texttt{starts\_with}
+\item \texttt{ends\_with}
+\end{itemize}
+
+它们同时针对 \texttt{std::string\_view} 和 \texttt{std::string} 实现。截至此刻（2018 年 7 月），Clang 6.0 已经支持这些函数。如果你愿意，可以尝试使用它们。
+\end{myInfoBox}
+
+\section{使用 string\_view 的风险}
+
+\texttt{std::string\_view} 加入标准，主要是为了允许进行性能优化。然而，它并不是字符串的替代品！正因如此，当你使用视图时，必须牢记几件潜在的有风险的事：
+
+\paragraph{留意非以空字符结尾的字符串}
+
+\texttt{string\_view} 在字符串末尾可能并不包含 \texttt{\textbackslash0}。所以你必须为此做好准备。
+
+\begin{itemize}
+\item \texttt{string\_view} 与所有接受传统 C 风格字符串的函数配合起来都很成问题，因为 \texttt{string\_view} 打破了 C 风格字符串关于终止符的假设。如果一个函数只接受 \texttt{const char*} 参数，那么把 \texttt{string\_view} 传进去很可能是个坏主意。另一方面，当这样的函数同时接受 \texttt{const char*} 和长度参数时，这样做也许是安全的。
+\item 转换成字符串——你不仅需要指定指向连续字符序列的指针，还需要指定长度。
+\end{itemize}
+
+\paragraph{引用与临时对象}
+
+\texttt{string\_view} 并不拥有内存，因此在处理临时对象时必须非常小心。
+
+一般而言，一个 \texttt{string\_view} 的生命期绝不能超过那个拥有字符串的对象的生命期。在以下情形中这一点尤为重要：
+
+\begin{itemize}
+\item 从函数返回 \texttt{string\_view}；
+\item 把 \texttt{string\_view} 存进对象或容器中。
+\end{itemize}
+
+为了探究所有这些问题，让我们从本章开头的初始示例说起。
+
+\subsection{初始示例的问题}
+
+引言一节向你展示过这样一个示例：
+
+\begin{codebox}[cpp]
+std::string_view StartFromWord(std::string_view str, std::string_view word)
+{
+return str.substr(str.find(word)); // substr creates only a new view
+}
+\end{codebox}
+
+这段代码对于非以空字符结尾的字符串没有任何问题——因为所有函数都来自 \texttt{string\_view} 的 API。
+
+然而，临时对象又如何呢？
+
+如果你这样调用会发生什么？
+
+\begin{codebox}[cpp]
+auto str = "My Super"s;
+auto sv = StartFromWord(str + " String", "Super");
+// use `sv` later in the code...
+\end{codebox}
+
+这样的代码可能会直接崩掉！
+
+\texttt{"Super"} 是一个临时的 \texttt{const char*} 字面量，它被作为 \texttt{string\_view word} 传入函数。这没问题，因为该临时对象保证会存活得与整个函数调用一样久。然而，字符串拼接 \texttt{str + " String"} 的结果是一个临时对象，而函数却把这个临时对象的 \texttt{string\_view} 返回到了调用之外！
+
+因此，这类情况的一般性建议是：虽然从一个函数返回 \texttt{string\_view} 是可能的，但你必须小心，并且要确切清楚底层字符串的状态。
+
+要理解临时值的问题，最好看一看引用生命期延长。
+
+\subsection{引用生命期延长}
+
+下面这种情况会发生什么？
+
+\begin{codebox}[cpp]
+std::vector<int> GenerateVec()
+{
+return std::vector<int>(5, 1);
+}
+const std::vector<int>& refv = GenerateVec();
+\end{codebox}
+
+上面的代码安全吗？
+
+是的——C++ 规则规定，绑定到一个 const 引用的临时对象的生命期会被延长到与该引用本身一样久。
+
+下面是从标准中摘录的一个完整示例（C++17 草案 N4687²）15.2 临时对象 [class.temporary]：
+
+\footnotetext{² \url{https://wg21.link/n4687}}
+
+\begin{myQuote}
+[Example:
+struct S {
+S();
+S(int);
+friend S operator+(const S\&, const S\&);
+~S();
+};
+S obj1;
+const S\& cr = S(16)+S(23);
+S obj2;
+The expression S(16) + S(23) creates three temporaries: a first temporary T1 to hold the result of
+the expression S(16), a second temporary T2 to hold the result of the expression S(23), and a third
+temporary T3 to hold the result of the addition of these two expressions. The temporary T3 is then
+bound to the reference cr. It is unspecified whether T1 or T2 is created first. On an implementation
+where T1 is created before T2, T2 shall be destroyed before T1. The temporaries T1 and T2 are
+bound to the reference parameters of operator+; these temporaries are destroyed at the end of the
+full-expression containing the call to operator+. The temporary T3 bound to the reference cr is
+destroyed at the end of cr’s lifetime, that is, at the end of the program. In addition, the order in
+which T3 is destroyed takes into account the destruction order of other objects with static storage
+duration. That is, because obj1 is constructed before T3, and T3 is constructed before obj2, obj2
+shall be destroyed before T3, and T3 shall be destroyed before obj1. -end example]
+\end{myQuote}
+
+虽然你最好不要为所有变量都写出这样的代码，但在某些情况下它确实是个便利的特性，例如：
+
+\begin{codebox}[cpp]
+for (auto &elem : GenerateVec())
+{
+// ...
+}
+\end{codebox}
+
+在上面这个例子中，\texttt{GenerateVec} 在基于范围的 for 循环内部被绑定到一个引用（用于 vector 起始处的右值引用）。如果没有生命期延长这一支持，这段代码就会崩溃。
+
+它与 \texttt{string\_view} 有何关联？
+
+对于 \texttt{string\_view} 而言，下面这段代码通常很容易出错：
+
+\begin{codebox}[cpp]
+std::string func()
+{
+std::string s;
+// build s...
+return s;
+}
+std::string_view sv = func();
+// no temp lifetime extension!
+\end{codebox}
+
+这可能并不显而易见——\texttt{string\_view} 同样是一个常量视图，所以本应表现得几乎像一个 const 引用。但根据现有的 C++ 规则，事实并非如此——编译器会在整个表达式结束后立即销毁那个临时对象。在这种情况下，生命期无法被延长。
+
+\texttt{string\_view} 只是一个代理对象，类似于另一段代码：
+
+\begin{codebox}[cpp]
+std::vector<int> CreateVector() { ... }
+std::string GetString() { return "Hello"; }
+auto &x = CreateVector()[10]; // arbitrary element!
+auto pStr = GetString().c_str();
+\end{codebox}
+
+在这两种情况下，\texttt{x} 和 \texttt{pStr} 都不会延长在 \texttt{CreateVector()} 或 \texttt{GetString()} 中创建的临时对象的生命期。
+
+你可以通过以下方式修复它：
+
+\begin{codebox}[cpp]
+std::string func()
+{
+std::string s;
+// build s...
+return s;
+}
+auto temp = func();
+std::string_view sv { temp };
+// fine lifetime of temporary is extended through `temp`
+\end{codebox}
+
+每当你把某个函数的返回值赋给别的东西时，都必须确保该对象的生命期是正确的。
+
+有一份提案致力于修复 \texttt{string\_view} 以及其它本应具有引用生命期延长语义的类型所存在的问题：参见 P0936³。
+
+\footnotetext{³ \url{https://wg21.link/p0936}}
+
+\section{从 string\_view 初始化字符串成员}
+
+由于 \texttt{string\_view} 在作为函数传入参数时是 \texttt{const string\&} 的潜在替代品，我们不妨考虑字符串成员初始化的情况。在这里，\texttt{string\_view} 是最佳候选吗？
+
+例如：
+
+\begin{codebox}[cpp]
+class UserName {
+std::string mName;
+public:
+UserName(const std::string& str) : mName(str) { }
+};
+\end{codebox}
+
+如你所见，构造函数接受的是 \texttt{const std::string\& str}。
+
+你或许可以把这个常量引用替换成 \texttt{string\_view}：
+
+\begin{codebox}[cpp]
+UserName(std::string_view sv) : mName(sv) { }
+\end{codebox}
+
+我们来比较一下这两种实现在三种情形下的表现：从字符串字面量创建、从左值创建、从右值引用创建：
+
+\begin{codebox}[cpp]
+// creation from a string literal
+UserName u1{"John With Very Long Name"};
+// creation from l-value:
+std::string s2 {"Marc With Very Long Name"};
+UserName u2 { s2 };
+// use s2 later...
+// from r-value reference
+std::string s3 {"Marc With Very Long Name"};
+UserName u3 { std::move(s3) };
+// third case is also similar to taking a return value:
+std::string GetString() { return "some string..."; }
+UserName u4 { GetString() };
+\end{codebox}
+
+现在我们来分析 \texttt{UserName} 构造函数的两个版本——使用字符串引用，或使用字符串视图。
+
+请注意，\texttt{s2} 和 \texttt{s3} 的分配/创建不计入考量，我们只关注构造函数调用时发生了什么。对于 \texttt{s2}，我们也可以假设它之后还会在代码中被使用。
+
+对于 \texttt{const std::string\&}：
+
+\begin{itemize}
+\item \texttt{u1}——两次分配：第一次创建一个临时字符串并绑定到输入参数，然后再把它拷贝进 \texttt{mName}。
+\item \texttt{u2}——一次分配：我们以零成本的代价绑定到引用，然后再把它拷贝进成员变量。
+\item \texttt{u3}——一次分配：我们以零成本的代价绑定到引用，然后再把它拷贝进成员变量。
+\item 你得额外写一个接受右值引用的构造函数，才能在 \texttt{u1} 的情形下省去一次分配，并且这也能在 \texttt{u3} 的情形下省去一次拷贝（因为我们可以从右值引用移动）。
+\end{itemize}
+
+对于 \texttt{std::string\_view}：
+
+\begin{itemize}
+\item \texttt{u1}——一次分配——输入参数没有拷贝/分配，只有在创建 \texttt{mName} 时才有一次分配。
+\item \texttt{u2}——一次分配——为实参创建一个廉价的 \texttt{string\_view}，然后再把它拷贝进成员变量。
+\item \texttt{u3}——一次分配——为实参创建一个廉价的 \texttt{string\_view}，然后再把它拷贝进成员变量。
+\item 如果你希望在 \texttt{u3} 的情形下省去一次分配，你也得写一个接受右值引用的构造函数，因为你可以从右值引用移动。
+\end{itemize}
+
+虽然当你传入字符串字面量时 \texttt{string\_view} 表现更好，但当你针对已有的字符串使用它、或从它移动时，它并没有更好。
+
+然而，自 C++11 引入移动语义以来，通常更好的、也更安全的做法是把字符串按值传入，然后再从中移动。
+
+例如：
+
+\begin{codebox}[cpp]
+class UserName {
+std::string mName;
+public:
+UserName(std::string str) : mName(std::move(str)) { }
+};
+\end{codebox}
+
+现在我们得到如下结果：
+
+对于 \texttt{std::string}：
+
+\begin{itemize}
+\item \texttt{u1}——一次分配——为输入实参分配，然后一次移动进入 \texttt{mName}。这比使用 \texttt{const std::string\&} 时我们得到两次内存分配要好，也与 \texttt{string\_view} 的做法类似。
+\item \texttt{u2}——一次分配——我们得把值拷贝进实参，然后可以从中移动。
+\item \texttt{u3}——没有分配，只有两次移动操作——这比使用 \texttt{string\_view} 和 \texttt{const string\&} 都要好！
+\end{itemize}
+
+当你按值传递 \texttt{std::string} 时，代码不仅更简单，而且也不再需要为右值引用编写单独的重载。
+
+完整的代码示例见 \texttt{Chapter string\_view/initializing\_from\_string\_view.cpp}。
+
+这种按值传递的做法与 Scott Meyers 所著《Effective Modern C++》中的第 41 条“对于廉价移动且总是会被拷贝的可拷贝形参，考虑按值传递”是一致的。
+
+然而，\texttt{std::string} 移动起来真的廉价吗？
+
+尽管 C++ 标准并未规定这一点，但通常字符串是通过小字符串优化（SSO）来实现的——字符串对象含有额外的空间，用于在不额外分配内存的情况下容纳字符⁴。这意味着移动一个字符串与拷贝它是一样的。而且由于字符串较短，拷贝也很快。
+
+让我们重新考虑当字符串较短时按值传递的例子：
+
+\begin{codebox}[cpp]
+UserName u1{"John"}; // fits in SSO buffer
+std::string s2 {"Marc"}; // fits in SSO buffer
+UserName u2 { s2 };
+std::string s3 {"Marc"}; // fits in SSO buffer
+UserName u3 { std::move(s3) };
+\end{codebox}
+
+请记住：每一次移动都等同于一次拷贝。
+
+对于 \texttt{const std::string\&}：
+
+\begin{itemize}
+\item \texttt{u1}——两次拷贝：一次从输入的字符串字面量拷贝进临时字符串实参，另一次拷贝进成员变量。
+\item \texttt{u2}——一次拷贝：已有的字符串被绑定到引用实参，然后我们把它拷贝进成员变量一次。
+\item \texttt{u3}——一次拷贝：右值引用以零成本绑定到输入参数，之后我们把它拷贝进成员字段一次。
+\end{itemize}
+
+对于 \texttt{std::string\_view}：
+
+\begin{itemize}
+\item \texttt{u1}——一次拷贝：输入参数没有拷贝，只有在初始化 \texttt{mName} 时才发生一次拷贝。
+\item \texttt{u2}——一次拷贝：输入参数没有拷贝（因为创建 \texttt{string\_view} 很快），然后拷贝进成员变量一次。
+\item \texttt{u3}——一次拷贝：\texttt{string\_view} 创建代价很低，从实参到 \texttt{mName} 有一次拷贝。
+\item 额外风险：\texttt{string\_view} 可能指向一个已被销毁的字符串。
+\end{itemize}
+
+对于 \texttt{std::string}：
+
+\begin{itemize}
+\item \texttt{u1}——两次拷贝：输入实参从字符串字面量创建，然后拷贝进 \texttt{mName}。
+\item \texttt{u2}——两次拷贝：一次拷贝进实参，然后第二次拷贝进成员。
+\item \texttt{u3}——两次拷贝：一次拷贝进实参（移动即意味着拷贝），然后第二次拷贝进成员。
+\end{itemize}
+
+如你所见，对于短字符串，按值传递在你传入某个已有字符串时可能会“更慢”一些，仅仅因为你做了两次拷贝而不是一次。另一方面，当编译器看到一个值时，它或许能把代码优化得更好。而且，短字符串拷贝起来很廉价，所以潜在的“变慢”可能根本看不出来。
+
+总而言之，按值传递然后再从字符串实参移动，是更受青睐的方案。你既能得到简洁的代码，又能在较大字符串上获得更好的性能。
+
+一如既往，如果你的代码需要极致的性能，那就必须把所有可能的情形都实测一遍。
+
+\paragraph{其它类型与自动化}
+
+本节讨论的问题也可以推广到其它可拷贝、可移动的类型。如果移动操作很廉价，那么按值传递可能优于按引用传递。
+
+你也可以使用自动化工具，例如 Clang-Tidy，它能够检测出潜在的改进点。Clang Tidy 针对这种用例有一条专门的规则，参见 \texttt{clang-tidy - modernize-pass-by-value}⁵。
+
+\footnotetext{⁴ SSO 并未标准化，且可能发生变化。目前，MSVC（VS 2017）/GCC（8.1）下为 15 个字符，Clang（6.0）下为 22 个字符。对于跨平台代码，依赖基于 SSO 的优化并不可取。}
+
+\footnotetext{⁵ \url{https://clang.llvm.org/extra/clang-tidy/checks/modernize-pass-by-value.html}}
+
+下面是字符串传递以及字符串成员初始化的总结：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+传入形参 & \texttt{const string\&} & \texttt{string\_view} & string 传值并移动 \\
+\midrule
+\texttt{const char*} & 2 次分配 & 1 次分配 & 1 次分配 + 移动 \\
+\texttt{const char*}（SSO） & 2 次拷贝 & 1 次拷贝 & 2 次拷贝 \\
+左值 & 1 次分配 & 1 次分配 & 1 次分配 + 1 次移动 \\
+左值（SSO） & 1 次拷贝 & 1 次拷贝 & 2 次拷贝 \\
+右值 & 1 次分配 & 1 次分配 & 2 次移动 \\
+右值（SSO） & 1 次拷贝 & 1 次拷贝 & 2 次拷贝 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{处理非以空字符结尾的字符串}
+
+如果你从一个字符串得到 \texttt{string\_view}，那么它会指向一段以空字符结尾的内存：
+
+\begin{codebox}[cpp]
+std::string s = "Hello World";
+std::cout << s.size() << '\n';
+std::string_view sv = s;
+std::cout << sv.size() << '\n';
+\end{codebox}
+
+两条 \texttt{cout} 语句都会打印出 11。
+
+但如果你只持有字符串的一部分呢？
+
+\begin{codebox}[cpp]
+std::string s = "Hello World";
+std::cout << s.size() << '\n';
+std::string_view sv = s;
+auto sv2 = sv.substr(0, 5);
+std::cout << sv2.data() << '\n'; /// ooops?
+\end{codebox}
+
+\texttt{sv2} 应该只包含 \texttt{"Hello"}，但当你访问指向底层内存的指针时，你会拿到指向整个字符串的指针。表达式 \texttt{cout << sv2.data()} 会打印整个字符串，而不仅仅是它的一部分！\texttt{sv2.data()} 返回的是字符串 \texttt{s} 对象内部那个 \texttt{"Hello World"} 字符数组的指针。
+
+当然，当你打印 \texttt{sv2} 时，你会得到正确的结果：
+
+\begin{codebox}[cpp]
+std::cout << sv2 << '\n';
+// prints "Hello"
+\end{codebox}
+
+这是因为 \texttt{std::cout} 能正确处理 \texttt{string\_view} 类型。
+
+这个例子展示了所有假定以空字符结尾的字符串的第三方 API 都可能存在的潜在问题。举几个例子：
+
+\paragraph{使用 printf() 打印}
+
+例如：
+
+\begin{codebox}[cpp]
+std::string s = "Hello World";
+std::string_view sv = s;
+std::string_view sv2 = sv.substr(0, 5);
+printf("My String %s", sv2.data()); // oops?
+\end{codebox}
+
+相反，你应该使用：
+
+\begin{codebox}[cpp]
+printf("%.*s\n", static_cast<int>(sv2.size()), sv2.data());
+\end{codebox}
+
+\texttt{.*} 描述的是精度，参见 printf 规范⁶：
+
+\footnotetext{⁶ \url{http://www.cplusplus.com/reference/cstdio/printf/}}
+
+精度并不在格式字符串中指定，而是作为一个额外的整数值实参，放在那个需要被格式化的实参之前。
+
+\paragraph{像 atoi()/atof() 这样的转换函数：}
+
+\begin{codebox}[cpp]
+std::string number = "123.456";
+std::string_view svNum { number.data(), 3 };
+auto f = atof(svNum.data()); // should be 123, but is 123.456!
+std::cout << f << '\n';
+\end{codebox}
+
+\texttt{atof} 只接受指向以空字符结尾的字符串的指针，因此与 \texttt{string\_view} 不兼容。
+
+要修复这一点，你可以看看 \texttt{from\_chars} 函数（同样是在 C++17 中加入的）：
+
+\begin{codebox}[cpp]
+// use from_chars (C++17)
+std::string number = "123.456";
+std::string_view svNum { number.data(), 3 };
+int res = 0;
+std::from_chars(svNum.data(), svNum.data()+svNum.size(), res);
+std::cout << res << '\n';
+\end{codebox}
+
+\paragraph{通用解决方案}
+
+如果你的 API 只支持以空字符结尾的字符串，而你又无法切换到接受额外计数或大小参数的函数，那么你需要把一个视图转换成字符串。
+
+例如：
+
+\begin{codebox}[cpp]
+void ConvertAndShow(const char *str)
+{
+auto f = atof(str);
+std::cout << f << '\n';
+}
+std::string number = "123.456";
+std::string_view svNum { number.data(), 3 };
+// ... some code
+std::string tempStr { svNum.data(), svNum.size() };
+ConvertAndShow(tempStr.c_str());
+\end{codebox}
+
+\texttt{ConvertAndShow} 只能处理以空字符结尾的字符串，因此我们唯一的办法就是创建一个临时字符串 \texttt{tempStr}，然后再把它传给该函数。
+
+如果你想从 \texttt{string\_view} 创建一个字符串对象，请记得使用 \texttt{.data()} 和 \texttt{.size()}，这样你引用的是底层字符序列中正确的那一段。
+
+可运行示例见：\texttt{Chapter string\_view/string\_view\_null.cpp}。
+
+\section{性能与内存考量}
+
+把 \texttt{string\_view} 加入标准库，其核心思想在于性能与内存消耗。通过借助 \texttt{string\_view}，你可以有效地避免创建大量临时的字符串，从而提升性能。
+
+关于内存：\texttt{string\_view} 通常实现为 \texttt{[ptr, len]}——一个指针以及一个通常用来表示可能大小的 \texttt{size\_t}。
+
+正因如此，你应当把它的大小视为 8 字节或 16 字节（取决于架构是 x86 还是 x64）。
+
+如果我们考虑 \texttt{std::string} 类型，由于常见的小字符串优化，\texttt{std::string} 通常是 24 或 32 字节，也就是 \texttt{string\_view} 的两倍大小。如果字符串比 SSO 缓冲区更长，那么 \texttt{std::string} 会在堆上分配内存。如果 SSO 不被支持（这种情况很少见），那么 \texttt{std::string} 将由指向已分配内存的指针和大小构成。
+
+关于字符串操作的性能。
+
+\texttt{string\_view} 只拥有字符串操作的一个子集，即那些不会修改被引用字符序列的操作。像 \texttt{find()} 这样的函数，应当提供与字符串版本相同的性能。
+
+另一方面，\texttt{substr} 在 \texttt{string\_view} 中只是拷贝两个元素，而字符串则会执行一段内存区间的拷贝。复杂度是 O(1) 对 O(n)。因此，如果你需要切分一个较大的字符串并对这些切片进行处理，\texttt{string\_view} 的实现应当提供更好的速度。
+
+\subsection{常量表达式中的字符串}
+
+\texttt{string\_view} 一个有趣的特性是，它的所有方法都被标记为 constexpr（\texttt{copy}、\texttt{operator<<} 以及为字符串视图特化的 \texttt{std::hash} 函数除外）。借助这一能力，你可以在编译期处理字符串。
+
+例如：
+
+\begin{codebox}[cpp]
+// Chapter string_view/string_view_constexpr.cpp
+#include <string_view>
+int main()
+{
+using namespace std::literals;
+constexpr auto strv = "Hello Programming World"sv;
+constexpr auto strvCut = strv.substr("Hello "sv.size());
+static_assert(strvCut == "Programming World"sv);
+return strvCut.size();
+}
+\end{codebox}
+
+如果你使用一个现代编译器，例如带了以下选项的 GCC 8.1：\texttt{-std=c++1z -Wall -pedantic -O2}，那么编译出的汇编代码应当形如：
+
+\begin{codebox}
+main:
+movl
+$17, %eax
+ret
+\end{codebox}
+
+同样一段代码的类似版本，若使用 \texttt{std::string}，则会生成多得多的代码。由于这个例子使用了长字符串，小字符串优化无从施展，于是编译器必须为字符串的内存管理生成 \texttt{new}/\texttt{delete} 的代码。
+
+\section{从 boost::string\_ref 与 boost::string\_view 迁移}
+
+与 C++17 中大多数新类型一样，\texttt{string\_view} 也受到了 Boost 库的启发。Marshall Clow 在 1.53 版（2012 年 2 月）中实现了 \texttt{boost::string\_ref}，随后它演进为 \texttt{boost::string\_view}（加入于 1.61 版——2016 年 5 月）。
+
+\texttt{boost::string\_ref} 与 \texttt{boost::string\_view} 之间的主要区别在于对 constexpr 的支持。
+
+\texttt{boost::string\_view} 实现了与 \texttt{std::string\_view} 相同的功能，并额外增加了几个新函数：
+
+\begin{itemize}
+\item \texttt{starts\_with}
+\item \texttt{ends\_with}
+\end{itemize}
+
+完整的头文件见 \texttt{boost/doc/libs/1\_67\_0/boost/utility/string\_view.hpp}⁷，以及 Boost 的 utility 库⁸。
+
+\footnotetext{⁷ \url{https://www.boost.org/doc/libs/1_67_0/boost/utility/string_view.hpp}}
+
+\footnotetext{⁸ \url{https://www.boost.org/doc/libs/1_67_0/boost/utility/}}
+
+关于 \texttt{string\_ref} 被弃用的讨论链接：“string\_view versus string\_ref”⁹。
+
+\footnotetext{⁹ \url{https://lists.boost.org/Archives/boost/2017/07/236903.php}}
+
+\section{示例}
+
+下面你可以找到两个使用 \texttt{string\_view} 的例子。
+
+\subsection{处理不同的字符串 API}
+
+\texttt{string\_view} 一个有趣的用例，是当你在一段需要与不同字符串实现打交道的代码中使用它时。
+
+例如，你可能拥有来自 MFC 的 \texttt{CString}、来自 C-API 的 \texttt{const char*}、来自 Qt 的 \texttt{QString}，当然还有 \texttt{std::string}。
+
+与其为不同的字符串类型编写重载，不如借助 \texttt{string\_view}！
+
+例如：
+
+\begin{codebox}[cpp]
+void Process(std::string_view sv) { }
+\end{codebox}
+
+如果你想把 \texttt{Process} 用于不同的字符串实现，那么你要做的只是从你的类型创建一个字符串视图。大多数字符串类型都应当能轻松做到这一点。
+
+例如：
+
+\begin{codebox}[cpp]
+// MFC Strings:
+CString cstr;
+Process(std::string_view{cstr.GetString(), cstr.GetLength()});
+// QT Strings:
+QString qstr;
+Process(std::string_view{qstr.toLatin1().constData()};
+// Your implementation:
+MySuperString myStr;
+// MySuperString::GetData() - returns char*
+// MySuperString::Length() - returns length of a string
+Process(std::string_view{myStr.GetData(), myStr.Length()});
+\end{codebox}
+
+假设性地讲，\texttt{Process()} 本可以实现为 \texttt{Process(const char*, int len)}，但使用 \texttt{string\_view} 后代码更明确、也更简洁。此外，你还拥有 \texttt{string\_view} 的全部可用方法，这样的代码也比 C 风格更方便。
+
+\subsection{字符串分割}
+
+\texttt{string\_view} 可能是字符串分割的一个潜在优化点。如果你拥有一个大而持久的字符串，你或许想创建一个 \texttt{string\_view} 对象的列表，用来映射那个较大字符串中的各个单词。
+
+请注意，这段代码受到了 Marco Arena 的文章——\texttt{string\_view odi et amo}¹⁰ 的启发。
+
+\footnotetext{¹⁰ \url{https://marcoarena.wordpress.com/2017/01/03/string_view-odi-et-amo/}}
+
+\begin{codebox}[cpp]
+// Chapter string_view/string_view_split.cpp
+std::vector<std::string_view>
+splitSV(std::string_view strv, std::string_view delims = " ")
+{
+std::vector<std::string_view> output;
+auto first = strv.begin();
+while (first != strv.end())
+{
+const auto second = std::find_first_of(
+first, std::cend(strv),
+std::cbegin(delims), std::cend(delims));
+if (first != second)
+{
+output.emplace_back(strv.substr(std::distance(strv.begin(), first),
+std::distance(first, second)));
+}
+if (second == strv.end())
+break;
+first = std::next(second);
+}
+return output;
+}
+\end{codebox}
+
+使用示例：
+
+\begin{codebox}[cpp]
+const std::string str {
+"Hello
+Extra,,, Super, Amazing World"
+};
+for (const auto& word : splitSV(str, " ,"))
+std::cout << word << '\n';
+\end{codebox}
+
+程序将输出：
+
+\begin{codebox}
+Hello
+Extra
+Super
+Amazing
+World
+\end{codebox}
+
+该算法遍历输入的 \texttt{string\_view} 并寻找断点——即与分隔符相匹配的字符。然后代码提取该序列的一部分——位于上一次断点与本次新断点之间。这个子视图被存入输出的 vector 中。
+
+关于该实现的一些说明：
+
+\begin{itemize}
+\item 该算法的 \texttt{string\_view} 版本假定输入的字符串是持久的，而不是一个临时对象。对于返回的 \texttt{string\_view} vector 要小心，因为它同样指向那个输入字符串。
+\item 指令 \texttt{if (first != second)}——可以防止加入空的“单词”，例如在出现多个相邻分隔符（比如双空格）的情况下。
+\item 该算法使用了 \texttt{std::find\_first\_of}，但也可以使用 \texttt{string\_view::find\_first\_of}。成员方法不会返回迭代器，而是返回在字符串中的位置。在某些测试中，当分隔符数量较少时，成员方法比 \texttt{std::} 版本更慢¹¹。
+\end{itemize}
+
+\footnotetext{¹¹ 相关实验见 C++17 中的 std::string\_view 与 std::string 性能对比，以及 Bartek 的编程博客：C++17 中的 std::string\_view 与 std::string 性能对比，其中有专门的讨论和可能的其他改进。}
+
+\section{小结}
+
+以下是关于 \texttt{std::string\_view} 需要记住的要点：
+
+\begin{itemize}
+\item 它是 \texttt{std::basic\_string\_view<charType, traits<charType>>} 的一个特化——其中 \texttt{charType} 等于 \texttt{char}。
+\item 它是一个连续字符序列的非拥有视图。
+\item 它在末尾可能不包含空终止符。
+\item 它可以用来优化代码，并减少对字符串临时拷贝的需求。
+\item 它包含了 \texttt{std::string} 中那些不改变底层字符的大部分操作。
+\item 它的操作也被标记为 constexpr。
+\end{itemize}
+
+但是：
+
+\begin{itemize}
+\item 确保底层字符序列仍然存在！
+\item 虽然 \texttt{std::string\_view} 看起来像是字符串的一个常量引用，但语言并不会延长那些绑定到 \texttt{std::string\_view} 的返回临时对象的生命期。
+\item 当你从 \texttt{string\_view} 构建字符串时，务必记得使用 \texttt{stringView.size()}。\texttt{size()} 方法能正确标记 \texttt{string\_view} 的结尾。
+\item 当你把 \texttt{string\_view} 传入接受以空字符结尾的字符串的函数时要小心，除非你确信你的 \texttt{string\_view} 包含了一个空终止符。
+\end{itemize}
+
+\subsection{编译器支持}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+\texttt{std::string\_view} & 7.1 & 4.0 & VS 2017 15.0 \\
+\bottomrule
+\end{tabularx}
+\end{table}

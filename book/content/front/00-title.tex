@@ -1,0 +1,30 @@
+% =============================================================================
+%  封面（Cover）—— 直接采用英文原书封面
+%  · 图片自原书 PDF 首页按 300dpi 提取，并预裁切至版面宽高比 531.36/628.83，
+%    可无变形满版铺放（book/images/cover.png）
+%  · remember picture / overlay 满版绘制，不受版心影响（需编译两遍生效）
+% =============================================================================
+\thispagestyle{empty}
+
+\begin{tikzpicture}[remember picture, overlay]
+  \node[anchor=north west, inner sep=0pt]
+    at (current page.north west)
+    {\includegraphics[width=\paperwidth,height=\paperheight]{images/cover.png}};
+\end{tikzpicture}
+
+\null
+\clearpage
+
+% ---------- 献词页（与原书一致：封面后独立一页） ----------
+\thispagestyle{empty}
+\vspace*{0.45\textheight}
+\begin{center}
+{\sffamily\fontsize{12bp}{16bp}\selectfont 谨以此书献给 Wiola 和 Mikołaj}
+\end{center}
+\vfill
+\begin{center}
+{\sffamily\fontsize{8.5bp}{12bp}\selectfont © 2018--2019 Bartłomiej Filipek\quad|\quad 中文翻译版}
+\end{center}
+
+\null
+\clearpage

@@ -1,0 +1,899 @@
+并发与并行（concurrency and parallelism）是现代任何编程语言的核心要素。在 C++11 之前，语言层面并没有对线程的标准支持——你只能使用第三方库或系统 API。现代 C++ 开始引入越来越多必需的特性：线程、原子操作、锁、\texttt{std::async} 与 \texttt{future}。
+
+C++17 为我们提供了一种并行化大部分标准库算法的方式。借助一个强大却又直观的抽象层，你可以从机器中榨取更多的计算能力。
+
+本章你将学到：
+\begin{itemize}
+\item C++ 在并行与并发方面的未来方向
+\item 为何 \texttt{std::thread} 还不够
+\item 什么是执行策略
+\item 如何运行并行算法
+\item 哪些算法被并行化了
+\item 新增了哪些算法
+\item 并行执行的预期性能
+\item 并行执行与基准测试的示例
+\end{itemize}
+
+
+\section{引言}
+
+如果我们审视周围的计算机，会发现大多数都是多处理器单元。即便是手机也有四个甚至八个核心。更不用说配备数百（甚至数千）个小型计算核心的显卡了。
+
+多核机器的趋势在 Herb Sutter 的著名文章《The Free Lunch Is Over: A Fundamental Turn Toward Concurrency in Software》\footnote{\url{http://www.gotw.ca/publications/concurrency-ddj.htm}} 中得到了完美的总结。该文章发表于 2006 年。
+
+环顾四周便足以看出，这一趋势并未放缓。
+
+对于简单的应用而言，或许没有必要动用机器的全部计算能力，但有些应用恰恰需要如此：游戏、快速响应的应用、图形处理、音视频编辑、数据处理、金融系统、服务器以及许多其他类型的系统。
+
+在 CPU 上创建线程并并发地处理任务，是实现这一目标的一种方式。
+
+借助 C++11/14，我们终于把线程引入了标准库。你现在可以创建 \texttt{std::thread} 的实例，而不必依赖第三方库或系统 API。此外，还有基于 \texttt{future} 的异步处理（\texttt{std::async}）。
+
+多线程是现代 C++ 的重要一环。在 C++ 标准委员会中，有一个专门的小组——“SG1，并发（Concurrency）”——负责把更多此类特性引入标准。
+
+未来的方向有哪些？
+\begin{itemize}
+\item 协程（Coroutines）
+\item 原子智能指针（Atomic Smart pointers）
+\item 事务内存（Transactional Memory）
+\item 屏障（Barriers）
+\item 任务块（Tasks blocks）
+\item 并行（Parallelism）
+\item 计算（Compute）
+\item 执行器（Executors）
+\item 异构编程模型支持（Heterogeneous programming models support）
+\end{itemize}
+
+如你所见，计划就是尽可能地把机器的计算能力直接通过标准库暴露出来。
+
+
+\subsection{不止是线程}
+
+如前所述，使用线程并非利用机器算力的唯一方式。如果你的 CPU 有 8 个核心，那么你可以用 8 个线程；假设你能把工作拆分成独立的块，那么理论上你的任务处理速度可以达到单线程的数倍。
+
+但还有进一步加速的可能！
+
+那么剩余的算力从何而来？来自 CPU 的向量指令与 GPU 计算。
+
+第一个要素——向量指令——让你能够在单条指令中计算数组的多个分量。这也被称为 SIMD（单指令多数据，Single Instruction Multiple Data）。大多数 CPU 拥有 128 位宽的寄存器，而近期的芯片甚至包含 256 或 512 位宽的寄存器（AVX 256、AVX 512）。
+
+例如，借助 AVX-512 指令，你可以同时操作 16 个整数值（32 位）！
+
+第二个要素是 GPU。它可能包含数百个更小的核心。
+
+有一些第三方 API 可以让你访问 GPU/向量化：例如 CUDA、OpenCL、OpenGL、Intel TBB、OpenMP 等等。甚至你的编译器也可能尝试对某些代码做自动向量化。尽管如此，我们仍希望标准库直接提供这种支持，这样同一份代码就能在多种平台上使用。
+
+C++17 朝这个方向迈进了一小步，让我们能够使用更多的计算能力：它为标准库中的算法解锁了自动向量化/自动并行化特性。
+
+
+\section{概览}
+
+从用户视角来看，C++17 的这一新特性出奇地简单。你有一个新的参数，可以传给大多数标准算法：这个新的参数叫做执行策略（execution policy）。
+
+\texttt{std::algorithm\_name(policy, /* normal args... */);}
+
+稍后我们会深入细节，但总体思路是：你调用一个算法，然后指定它可以如何执行——可以并行，还是只能串行。
+
+例如：
+
+\begin{codebox}[cpp]
+std::vector<int> v = genLargeVector();
+// sort a vector using a parallel policy
+std::sort(std::execution::par, v.begin(), v.end());
+\end{codebox}
+
+上面的例子会用并行策略对向量排序——由第一个实参 \texttt{std::execution::par} 指定。整个机制对用户是透明的。具体如何并行地运行任务，由 STL 的实现自行选择。通常，它们可能会利用线程池。
+
+之所以需要这个提示——执行策略参数——是因为编译器无法从代码中推导出一切。作为代码的作者，只有你知道是否存在副作用、可能的竞态条件、死锁，或者并行运行是否毫无意义（比如你有一个很小的元素集合）。
+
+C++17 的并行特性源自 2015 年正式发布的技术规范（Technical Specification）。把并行算法引入 C++ 的整个项目耗时超过五年——它始于 2012 年，并于 2017 年合并进标准。参见论文：P0024 - The Parallelism TS Should be Standardised\footnote{\url{https://wg21.link/P0024}}。
+
+
+\section{执行策略}
+
+执行策略参数会告诉算法它应当如何被执行。我们拥有以下选项：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X X}
+\toprule
+策略名称 & 说明 \\
+\midrule
+\texttt{sequenced\_policy} & 一种执行策略类型，作为唯一类型用于消除并行算法重载的歧义，并要求并行算法的执行不被并行化。对应的全局对象是 \texttt{std::execution::seq}。 \\
+\texttt{parallel\_policy} & 一种执行策略类型，作为唯一类型用于消除并行算法重载的歧义，并指示并行算法的执行可以并行化。 \\
+\texttt{parallel\_unsequenced\_policy} & 一种执行策略类型，作为唯一类型用于消除并行算法重载的歧义，并指示并行算法的执行可以并行化且向量化。 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+我们还有三个与每种执行策略类型对应的全局对象：
+\begin{itemize}
+\item \texttt{std::execution::seq}
+\item \texttt{std::execution::par}
+\item \texttt{std::execution::par\_unseq}
+\end{itemize}
+
+请注意，执行策略是唯一类型（unique types），各自对应其全局对象。它们既不是枚举，也不共享同一个基类型。
+
+执行策略的声明与全局对象位于 \texttt{<execution>} 头文件中。
+
+
+\subsection{理解执行策略}
+
+为了理解不同执行策略之间的区别，我们来尝试建立一个模型，看看算法可能如何工作。
+
+考虑一个简单的 \texttt{float} 值向量。在下面的例子中，向量的每个元素乘以 2，结果存入一个输出容器：
+
+\begin{codebox}[cpp]
+std::vector<float> vecX = {...};
+// generate
+std::vector<float> vecY(vecX.size());
+std::transform(
+std::execution::seq,
+begin(vecX), end(vecX),
+// input range
+begin(vecY),
+// output
+[](float x) { return x * 2.0f; }); // operation
+\end{codebox}
+
+下面是上述算法串行执行的伪代码：
+
+\begin{codebox}[text]
+operation
+{
+load vecX[i] into RegisterX
+multiply RegisterX by 2.0f
+store RegisterX into vecY[i]
+}
+\end{codebox}
+
+在串行执行中，我们访问一个元素（来自 vecX），执行操作，然后把结果存入输出（vecY）。所有元素的执行都发生在单个线程上（即调用线程）。
+
+使用 \texttt{par} 策略时，第 i 个元素的整个操作会在一个线程上执行。但可能会有多个线程处理容器中不同的元素。例如，如果系统中有 8 个空闲线程，那么容器的 8 个元素可能同时被计算。元素的访问顺序是不确定的。
+
+标准库的实现通常会利用某种线程池来执行并行算法。该池持有一些工作线程（一般数量与系统核心数相同），然后调度器会把输入切分成块，并分配给这些工作线程\footnote{你可以观看 Pedro Teixeira 关于 Windows 线程池的精彩访谈——Inside Windows 8: Pedro Teixeira - Thread pools | Channel 9。这正是 MSVC 实现所采用的方式。}。理论上，在 CPU 上你也可以创建与容器元素数量一样多的线程，但由于上下文切换，那样并不会带来好的性能。另一方面，使用 GPU 的实现可能会提供数百个更小的“核心”，因此在那种场景下调度器的工作方式可能完全不同。
+
+第三个执行策略 \texttt{par\_unseq} 是并行执行策略的扩展。第 i 个元素的操作会在一个独立的线程上执行，但该操作的指令也可能被交错并执行向量化。
+
+例如：
+
+\begin{codebox}[text]
+operation
+{
+load vecX[i...i+3] into RegisterXYZW
+multiply RegisterXYZW by 2 // 4 elements at once!
+store RegisterXYZW into vecY[i...i+3]
+}
+\end{codebox}
+
+上面的伪代码用 RegisterXYZW 表示一个能存放容器 4 个元素的宽寄存器。例如，在 SSE（流式 SIMD 扩展，Streaming SIMD Extensions）中，你有 128 位寄存器，可以处理 4 个 32 位值，比如 4 个整数或 4 个浮点数（或者存放 8 个 16 位值）。不过，这种向量化还可能扩展到更大的寄存器，例如 AVX 中的 256 位甚至 512 位寄存器。具体选择哪种向量化方案，由标准库的实现决定。
+
+在这种情况下，操作的每条指令都被“复制”并与其他指令交错。这样，编译器就能生成一次性处理容器多个元素的指令。
+
+理论上，如果你有 8 个空闲的系统线程，配合 128 位 SIMD 寄存器，并且处理的是 \texttt{float} 值（32 位），那么我们可以一次性计算 8*4 = 32 个值！
+
+\begin{myInfoBox}
+为何需要串行策略？
+
+大多数时候你可能更想使用并行策略，或者并行且非顺序（unsequenced）策略。但出于调试目的，使用 \texttt{std::execution::seq} 可能更方便。这个参数也很方便，因为你可以通过模板参数轻松地在不同的执行模型之间切换。对某些算法而言，串行策略甚至可能比 C++14 的对应版本性能更好。详见“基准测试”一节。
+\end{myInfoBox}
+
+
+\subsection{限制与不安全的指令}
+
+执行策略的整个意义在于，以声明式的方式毫不费力地并行化标准算法。尽管如此，你仍需注意一些限制。
+
+例如，使用 \texttt{std::par} 时，如果你想修改共享资源，就需要使用某种同步机制来防止数据竞态和死锁\footnote{当你只想读取共享资源时，则无需同步。}：
+
+\begin{codebox}[cpp]
+std::vector<int> vec(1000);
+std::iota(vec.begin(), vec.end(), 0);
+std::vector<int> output;
+std::mutex m;
+std::for_each(std::execution::par, vec.begin(), vec.end(),
+[&output, &m, &x](int& elem) {
+if (elem % 2 == 0) {
+std::lock_guard guard(m);
+output.push_back(elem);
+}
+});
+\end{codebox}
+
+上面的代码先过滤输入向量，然后把元素放入输出容器。
+
+如果你忘记使用互斥量（或其他形式的同步），那么 \texttt{push\_back} 可能会引发数据竞态——因为多个线程可能同时尝试向向量添加新元素。
+
+上面的例子也展示了很差的性能，因为过多的同步点会扼杀并行执行。
+
+使用 \texttt{par} 执行策略时，尽量少访问共享资源。
+
+使用 \texttt{par\_unseq} 时，函数调用可能被交错，因此禁止使用不安全的向量化代码。例如，使用互斥量或内存分配可能导致数据竞态和死锁。
+
+\begin{codebox}[cpp]
+std::vector<int> vec = GenerateData();
+std::mutex m;
+int x = 0;
+std::for_each(std::execution::par_unseq, vec.begin(), vec.end(),
+[&m, &x](int& elem) {
+std::lock_guard guard(m);
+elem = x;
+x++; // increment a shared value
+});
+\end{codebox}
+
+由于指令可能在同一个线程上交错，你可能最终得到如下的动作序列：
+
+\begin{codebox}[cpp]
+std::lock_guard guard(m) // for i-th element
+std::lock_guard guard(m) // for i+1-th element
+...
+\end{codebox}
+
+如你所见，同一互斥量上的两把锁会发生在单个线程上，从而导致死锁！
+
+在执行 \texttt{par\_unseq} 策略时不要使用同步与内存分配。
+
+
+\subsection{异常}
+
+使用执行策略时，你需要为两种情况做好准备。
+\begin{itemize}
+\item 调度器或实现未能为调用分配资源——此时会抛出 \texttt{std::bad\_alloc}。
+\item 用户代码（函数对象）抛出异常——这种情况下，异常不会被重新抛出，而是调用 \texttt{std::terminate()}。
+\end{itemize}
+
+参见下面的例子。
+
+\begin{codebox}[cpp]
+// Chapter Parallel Algorithms/par_exceptions.cpp
+try
+{
+std::vector<int> v{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+std::for_each(std::execution::par, v.begin(), v.end(),
+[](int& i) {
+std::cout << i << '\n';
+if (i == 5)
+throw std::runtime_error("something wrong... !");
+});
+}
+catch (const std::bad_alloc& e)
+{
+std::cout << "Error in execution: " << e.what() << '\n';
+}
+catch (const std::exception& e) // will not happen
+{
+std::cout << e.what() << '\n';
+}
+catch (...)
+{
+std::cout << "error!\n";
+}
+\end{codebox}
+
+如果你运行上面的代码，catch 部分只会处理 \texttt{std::bad\_alloc}。而如果你因为某个异常退出了 lambda，那么会调用 \texttt{std::terminate}。异常不会被重新抛出。
+
+\begin{myInfoBox}
+使用并行算法时，为了更好的错误处理，尽量让你的函数对象为 \texttt{noexcept}。
+\end{myInfoBox}
+
+
+\section{算法更新}
+
+执行策略参数被添加到了大多数现有算法上。列表如下：
+
+\texttt{adjacent\_difference} \texttt{inplace\_merge} \texttt{replace\_copy} \texttt{adjacent\_find} \texttt{is\_heap} \texttt{replace\_copy\_if} \texttt{all\_of} \texttt{is\_heap\_until} \texttt{replace\_if} \texttt{any\_of} \texttt{is\_partitioned} \texttt{reverse} \texttt{copy} \texttt{is\_sorted} \texttt{reverse\_copy} \texttt{copy\_if} \texttt{is\_sorted} \texttt{rotate} \texttt{copy\_n} \texttt{is\_sorted\_until} \texttt{rotate\_copy} \texttt{count} \texttt{lexicographical\_compare} \texttt{search} \texttt{count\_if} \texttt{max\_element} \texttt{search\_n} \texttt{equal} \texttt{merge} \texttt{set\_difference} \texttt{exclusive\_scan} \texttt{min\_element} \texttt{set\_intersection} \texttt{fill} \texttt{minmax\_element} \texttt{set\_symmetric\_difference} \texttt{fill\_n} \texttt{mismatch} \texttt{set\_union} \texttt{find} \texttt{move} \texttt{sort} \texttt{find\_end} \texttt{none\_of} \texttt{stable\_partition} \texttt{find\_first\_of} \texttt{nth\_element} \texttt{stable\_sort} \texttt{find\_if} \texttt{partial\_sort} \texttt{swap\_ranges} \texttt{find\_if\_not} \texttt{partial\_sort\_copy} \texttt{transform} \texttt{for\_each} \texttt{partition} \texttt{transform\_exclusive\_scan} \texttt{for\_each\_n} \texttt{partition\_copy} \texttt{transform\_inclusive\_scan} \texttt{generate} \texttt{remove} \texttt{transform\_reduce} \texttt{generate\_n} \texttt{remove\_copy} \texttt{uninitialized\_copy} \texttt{includes} \texttt{remove\_copy\_if} \texttt{uninitialized\_copy\_n} \texttt{inclusive\_scan} \texttt{remove\_if} \texttt{uninitialized\_fill} \texttt{inner\_product} \texttt{replace} \texttt{uninitialized\_fill\_n} \texttt{unique} \texttt{unique\_copy}。
+
+
+\section{新算法}
+
+为了全面支持新的并行执行模式，标准库还配备了一组新算法：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X X}
+\toprule
+算法 & 说明 \\
+\midrule
+\texttt{for\_each} & 类似于 \texttt{for\_each}，但返回 \texttt{void}。 \\
+\texttt{for\_each\_n} & 对序列的前 n 个元素应用函数对象。 \\
+\texttt{reduce} & 类似于 \texttt{accumulate}，但允许乱序执行以支持并行。 \\
+\texttt{transform\_reduce} & 先用一元操作变换输入元素，再乱序归约输出。 \\
+\texttt{exclusive\_scan} & \texttt{partial\_sum} 的并行版本，在第 i 个和中排除第 i 个输入元素，乱序执行以支持并行。 \\
+\texttt{inclusive\_scan} & \texttt{partial\_sum} 的并行版本，在第 i 个和中包含第 i 个输入元素，乱序执行以支持并行。 \\
+\texttt{transform\_exclusive\_scan} & 先应用函数对象，再计算排他扫描。 \\
+\texttt{transform\_inclusive\_scan} & 先应用函数对象，再计算包含扫描。 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+这些新算法形成三组：\texttt{for\_each}、\texttt{reduce}，以及 \texttt{scan}，外加它们的变体。借助 \texttt{reduce} 和 \texttt{scan}，你还能得到“融合”版本，例如 \texttt{transform\_reduce}。这些组合应当能带来比使用两个独立步骤更好的性能——因为并行执行的初始化开销更小，而且少了一轮循环遍历。
+
+新算法也提供了不带执行策略参数的重载，以便你以标准串行版本使用它们。
+
+下面是对每一组算法的说明。
+
+
+\subsection{For Each 算法}
+
+在 \texttt{for\_each} 的串行版本（即 C++17 之前可用的版本）中，该算法会返回一个一元函数作为返回值。在并行版本中返回这样的对象是不可能的，因为调用的顺序是不确定的。
+
+下面是一个基本示例：
+
+\begin{codebox}[cpp]
+// Chapter Parallel Algortihms/par_basic.cpp
+std::vector<int> v(100);
+std::iota(v.begin(), v.end(), 0);
+std::for_each(std::execution::par, v.begin(), v.end(),
+[](int& i) { i += 10; });
+std::for_each_n(std::execution::par, v.begin(), v.size()/2,
+[](int& i) { i += 10; });
+\end{codebox}
+
+第一个 \texttt{for\_each} 算法会更新向量的所有元素，而第二个执行只作用于容器的前半部分。
+
+
+\subsection{理解 Reduce 算法}
+
+C++17 提供的另一个核心算法是 \texttt{std::reduce}。这个新算法提供了 \texttt{std::accumulate} 的并行版本。但理解二者之间的区别很重要。
+
+\texttt{std::accumulate} 返回区间内所有元素的和（或者某个二元操作的结果，该操作可以不同于单纯的求和）。
+
+\begin{codebox}[cpp]
+std::vector<int> v{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+auto sum = std::accumulate(v.begin(), v.end(), /*init*/0);
+// sum is 55
+\end{codebox}
+
+该算法是串行的，执行“左折叠”（left fold），也就是说它会从容器头到尾累加元素。
+
+上面的例子可以展开为以下代码：
+
+\begin{codebox}[text]
+sum = init +
+v[0] + v[1] + v[2] +
+v[3] + v[4] + v[5] +
+v[6] + v[7] + v[8] + v[9];
+\end{codebox}
+
+并行版本——\texttt{std::reduce}——使用树形方法（对子区间求和，再合并结果，分而治之）来计算最终的和。这种方法会以非确定性的顺序调用二元操作/求和。因此，如果 \texttt{binary\_op} 不满足结合律或不满足交换律，行为也是不确定的。
+
+下面这张简化图说明了 10 个元素的和在并行方式下可能如何工作：
+
+\myGraphic{0.9}{images/fig\_p235\_1.png}{并行求和示例}
+
+上面的 \texttt{accumulate} 例子可以改写为 \texttt{reduce}：
+
+\begin{codebox}[cpp]
+std::vector<int> v{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+auto sum = std::reduce(std::execution::par, v.begin(), v.end(), 0);
+\end{codebox}
+
+默认使用 \texttt{std::plus<>\{\}} 来计算归约步骤。
+
+关于结合律与交换律的一点解释：
+
+集合 S 上的二元操作 @ 是结合的（associative），如果对 S 中任意 x、y、z 都成立：
+\texttt{(x @ y) @ z = x @ (y @ z)}
+
+操作是交换的（commutative），如果：
+\texttt{x @ y = y @ x}
+
+例如，对于整数向量（求和时），\texttt{accumulate} 和 \texttt{reduce} 会得到相同结果，但对于 \texttt{float} 或 \texttt{double} 向量，结果可能略有差异。这是因为浮点求和操作不满足结合律。
+
+一个例子：
+
+\begin{codebox}[cpp]
+// #include <limits> - for numeric_limits
+std::cout.precision(std::numeric_limits<double>::max_digits10);
+std::cout << (0.1+0.2)+0.3 << " != " << 0.1+(0.2+0.3) << '\n';
+\end{codebox}
+
+输出为：
+
+\begin{codebox}[text]
+0.60000000000000009 != 0.59999999999999998
+\end{codebox}
+
+另一个例子是操作类型：对整数而言，加法（plus）既满足结合律又满足交换律，但减法既不结合也不交换：
+
+\begin{codebox}[cpp]
+1+(2+3) == (1+2)+3 // sum is associative
+1+8
+== 8+1
+// sum is commutative
+1-(5-4) != (1-5)-4 // subtraction is not associative
+1-7
+!= 7-1
+// subtraction is not commutative
+\end{codebox}
+
+\textbf{transform\_reduce —— 融合算法}
+
+为了获得更大的灵活性与性能，\texttt{reduce} 算法还有一个版本，允许你在归约之前先应用一个变换操作。
+
+\begin{codebox}[cpp]
+std::vector<int> v{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+auto sumTransformed = std::transform_reduce(std::execution::par,
+v.begin(),
+v.end(),
+0,
+std::plus<int>{},
+[](const int& i) { return i * 2; }
+);
+// sum is 110
+\end{codebox}
+
+上面的代码会先执行一元函数对象——把输入值翻倍的 lambda；然后结果被归约为一个单一的和。
+
+融合版本比使用两个算法（先 \texttt{std::reduce} 再 \texttt{std::reduce}）更快——因为实现只需执行一次并行执行的初始化。
+
+
+\subsection{Scan 算法}
+
+第三组新算法是 scan。它们实现了前缀和（partial sum）的版本，但是无序的。
+
+排他扫描（exclusive scan）在输出的第 i 个和中不包含第 i 个输入元素，而包含扫描（inclusive scan）则包含。
+
+例如，对于 array = \{1, 2, 3, 4, 5, 6, 7, 8, 9, 10\}，我们会得到如下前缀和取值：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c X}
+\toprule
+名称 & 起始下标 & 前缀和部分取值 \\
+\midrule
+排他扫描（Exclusive scan） & 3 & 6\ 10\ 15\ 21\ 28\ 36\ 45 \\
+包含扫描（Inclusive scan） & 1 & 1\ 3\ 6\ 10\ 15\ 21\ 28\ 36\ 45 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+与 \texttt{std::reduce} 类似，操作的顺序是非顺序的，因此要得到确定性的结果，\texttt{binary\_op} 必须满足结合律。
+
+scan 还有两个融合算法：\texttt{transform\_exclusive\_scan} 和 \texttt{transform\_inclusive\_scan}。这两个算法都会对输入容器执行一元操作，然后在输出上计算前缀和。
+
+前缀和在许多应用中起着关键作用，例如流式压缩（stream compaction）、计算积分图（summed area tables）或基数排序。下面这篇详细讲解这些算法的文章值得一读：GPU Gems 3 - Chapter 39. Parallel Prefix Sum (Scan) with CUDA\footnote{\url{https://developer.nvidia.com/gpugems/GPUGems3/gpugems3_ch39.html}}。
+
+
+\section{并行算法的性能}
+
+并行算法是一个强大的抽象层。尽管它们相对易用，但评估其性能却没那么直观。
+
+首先要说明的是，并行算法通常比串行版本做更多的工作。这是因为算法需要建立并安排线程子系统来运行任务。
+
+例如，如果你在 10 万元素的向量上调用 \texttt{std::transform}，那么 STL 实现需要把你的向量切分成块，然后调度每一块去恰当执行。如有必要，实现甚至可能在执行前先拷贝元素。如果你有一个带 10 个空闲线程的系统，这个 10 万元素的向量可能被切分成每块 1 万元素，然后每块由一个线程做变换。由于初始化开销以及并行代码的其他限制，总执行时间不会比串行版本快 10 倍。
+
+第二个起重要作用的因素是同步。如果你的操作需要在某些共享对象上同步，那么并行执行的性能就会下降。并行算法在分别执行独立任务时表现最佳。
+
+第三个对执行有很大影响的元素是内存吞吐。如果我们观察常见的桌面 CPU，会发现所有核心共享同一内存总线。因此，如果你的指令在等待从内存取数据，那么相对于串行的性能提升就显现不出来，因为所有核心都会在内存访问上同步。像 \texttt{std::copy}、\texttt{std::reverse} 这样的算法甚至可能比它们的串行版本更慢——至少在常见的 PC 硬件\footnote{参见 Visual C++ Team Blog 上的《Using C++17 Parallel Algorithms for Better Performance》一文中“Current Limitations of the MSVC Implementation of Parallel Algorithms”一节，其中并行 \texttt{std::reverse} 似乎慢了 1.6 倍。}上是如此。最好是让你的并行任务用 CPU 周期做计算，而不是等待内存访问。
+
+第四点重要的事是，算法的实现依赖性很强。它们可能使用不同的技术来实现并行。更不用说算法可能执行的设备——在 CPU 还是 GPU 上。
+
+目前，在流行编译器中只有一种实现可用——在 Visual Studio 2017 中。它基于 Windows 的线程池，只支持在 CPU 上执行，并跳过了向量化执行策略\footnote{VS 实现通常会以块为单位处理元素，因此自动向量化仍有可能优化代码，并允许向量指令以获得更好性能。}。
+
+等到 Clang/GCC 在标准库实现中给出官方支持，将会很有看头。Visual Studio 只能运行在 Windows 上，而 Clang/GCC 的版本必须支持更多系统。
+
+另一件事是 GPU 支持。凭借数百个更小的计算核心，算法可能比 CPU 版本跑得更快。重要的是要记住，在 GPU 上执行某件事之前，你通常需要把数据拷贝到 GPU 可见的内存中（除非是集成显卡那样的共享内存）。有时数据传输的开销可能会抵消整体性能。
+
+\begin{myInfoBox}
+如果你决定使用并行算法，最好针对串行版本测量其性能。有时，尤其是元素数量较少时，性能甚至可能更慢。
+\end{myInfoBox}
+
+
+\section{示例}
+
+到目前为止，你已经看过了并行算法的基础代码示例。本节将介绍更多具有更复杂场景的例子。
+
+\begin{itemize}
+\item 你会看到几个基准测试，并看到相对串行版本的性能提升。
+\item 我们将讨论如何在同一并行算法中处理多个容器的例子。
+\item 还会有一个如何实现并行版本来统计元素个数的示例。
+\end{itemize}
+
+请注意，所有基准测试的测量都只使用了 Visual Studio——因为它是流行编译器中唯一可用的并行算法实现。等 GCC 和 Clang 的实现就绪后，基准测试会更新。
+
+
+\subsection{基准测试}
+
+最后，我们来看看基础算法的性能。
+
+来看一个例子：我们对每个元素执行独立的任务——使用 \texttt{std::transform}。在那个例子中，相对串行版本的加速应当更明显。
+
+\begin{codebox}[cpp]
+// Chapter Parallel Algorithms/par_benchmark.cpp
+#include <algorithm>
+#include <execution>
+#include <iostream>
+#include <numeric>
+#include "simpleperf.h"
+int main(int argc, const char* argv[])
+{
+const size_t vecSize = argc > 1 ? atoi(argv[1]) : 6000000;
+std::cout << vecSize << '\n';
+std::vector<double> vec(vecSize, 0.5);
+std::vector out(vec);
+RunAndMeasure("std::transform seq", [&vec, &out] {
+std::transform(std::execution::seq, vec.begin(), vec.end(), out.begin(),
+[](double v) {
+return std::sin(v)*std::cos(v);
+}
+);
+return out.size();
+});
+RunAndMeasure("std::transform par", [&vec, &out] {
+std::transform(std::execution::par, vec.begin(), vec.end(), out.begin(),
+[](double v) {
+return std::sin(v)*std::cos(v);
+}
+);
+return out.size();
+});
+return 0;
+}
+\end{codebox}
+
+该代码计算 sin*cos\footnote{你也可以用更优的方式计算 sin*cos：\texttt{sin(2x) = 2 sin(x) cos(x)}。} 并把结果存入输出向量。之所以用这些三角函数，是为了多用一些 CPU 算术指令，而不只是从内存取一个元素。
+
+应用在两台机器上运行：
+\begin{itemize}
+\item i7 4720H——指 Win 10 64 位，i7 4720H，基础频率 2.60 GHz，4 核/8 线程，MSVC 2017 15.8，Release 模式，x86。
+\item i7 8700——指 Win 10 64 位，i7 8700，基础频率 3.2 GHz，6 核/12 线程，MSVC 2017 15.8，Release 模式，x86。
+\end{itemize}
+
+RunAndMeasure 是一个辅助函数，它运行一个函数并打印计时。其结果在后面被使用，以免编译器把该变量优化掉：
+
+\begin{codebox}[cpp]
+template <typename TFunc> void RunAndMeasure(const char* title, TFunc func)
+{
+const auto start = std::chrono::steady_clock::now();
+ret = func();
+const auto end = std::chrono::steady_clock::now();
+std::cout << title
+<< ": " << std::chrono::duration<double, std::milli>(end - start).count()
+<< " ms " << ret << '\n';
+}
+\end{codebox}
+
+下面是结果（时间单位毫秒，按向量规模递增列出四组测量）：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c}
+\toprule
+算法 & i7 4720H（毫秒） & i7 8700（毫秒） \\
+\midrule
+\texttt{std::transform}, seq & 10.9347 & 7.51991 \\
+\texttt{std::transform}, par & 2.67921 & 1.30245 \\
+\texttt{std::transform}, seq & 21.8466 & 15.028 \\
+\texttt{std::transform}, par & 5.29644 & 2.34634 \\
+\texttt{std::transform}, seq & 32.7403 & 22.1449 \\
+\texttt{std::transform}, par & 7.79366 & 3.42295 \\
+\texttt{std::transform}, seq & 44.2565 & 30.1643 \\
+\texttt{std::transform}, par & 11.7558 & 4.40974 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\myGraphic{0.9}{images/fig\_p241\_1.png}{std::transform 基准测试}
+
+上面的例子可能是并行化的理想场景：我们的操作需要相当数量的指令（三角函数），而且所有任务彼此独立。在这种情况下，在一台 6 核 12 线程的机器上，性能几乎快了 7 倍！在一台 4 核 8 线程的计算机上，性能快了 4.2 倍。
+
+同样值得注意的是，当变换指令很简单，比如 \texttt{return v*2.0} 时，可能看不出性能提升。这是因为所有代码都只是在等待全局内存，表现可能和串行版本一样。
+
+下面是对向量中所有元素求和的基准测试：
+
+\begin{codebox}[cpp]
+// Chapter Parallel Algorithms/par_benchmark.cpp
+#include <algorithm>
+#include <execution>
+#include <iostream>
+#include <numeric>
+#include "simpleperf.h"
+int main(int argc, const char* argv[])
+{
+const size_t vecSize = argc > 1 ? atoi(argv[1]) : 6000000;
+std::cout << vecSize << '\n';
+std::vector<double> vec(vecSize, 0.5);
+RunAndMeasure("std::accumulate", [&vec] {
+return std::accumulate(vec.begin(), vec.end(), 0.0);
+});
+RunAndMeasure("std::reduce, seq", [&vec] {
+return std::reduce(std::execution::seq,
+vec.begin(), vec.end(), 0.0);
+}
+);
+RunAndMeasure("std::reduce, par", [&vec] {
+return std::reduce(std::execution::par,
+vec.begin(), vec.end(), 0.0);
+}
+);
+return 0;
+}
+\end{codebox}
+
+结果如下（时间单位毫秒，按向量规模递增列出三组测量）：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c}
+\toprule
+算法 & i7 4720H（毫秒） & i7 8700（毫秒） \\
+\midrule
+\texttt{std::accumulate} & 10.5814 & 9.62405 \\
+\texttt{std::reduce}, seq & 6.9556 & 4.58746 \\
+\texttt{std::reduce}, par & 4.88708 & 3.67831 \\
+\texttt{std::accumulate} & 17.8769 & 14.9163 \\
+\texttt{std::reduce}, seq & 11.5103 & 5.42508 \\
+\texttt{std::reduce}, par & 9.99877 & 4.5679 \\
+\texttt{std::accumulate} & 21.8888 & 19.6507 \\
+\texttt{std::reduce}, seq & 16.2142 & 6.80581 \\
+\texttt{std::reduce}, par & 10.8826 & 4.79214 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\myGraphic{0.9}{images/fig\_p243\_1.png}{std::accumulate 与 std::reduce 基准测试对比}
+
+在此次执行中，并行版本比标准的 \texttt{std::accumulate} 快了 2~4 倍！
+
+
+\subsection{同时处理多个容器}
+
+使用并行算法时，你有时可能想访问其他容器。例如，你可能想在这两个容器上执行 \texttt{for\_each}。
+
+主要技巧是获取当前正在处理元素的索引。然后你可以用该索引访问其他容器（假设这些容器大小相同）。
+
+我们可以用几种方式做到：
+\begin{itemize}
+\item 使用一个独立的索引容器
+\item 使用 zip 迭代器/包装器
+\end{itemize}
+
+来看这些技巧：
+
+\textbf{独立的索引容器}
+
+\begin{codebox}[cpp]
+// Chapter Parallel Algorithms/par_iterating_multiple.cpp
+void Process(int a, int b) { }
+std::vector<int> v(100);
+std::vector<int> w(100);
+std::iota(v.begin(), v.end(), 0);
+std::iota(w.begin(), w.end(), 0);
+std::vector<size_t> indexes(v.size());
+std::iota(indexes.begin(), indexes.end(), 0);
+std::for_each(std::execution::par, indexes.begin(), indexes.end(),
+[&v, &w](size_t& id) {
+Process(v[id], w[id]);
+}
+);
+\end{codebox}
+
+如你在上面的代码中所见，必须生成一个独立的索引向量。由于执行顺序未指定，我们不能用简单的 i 变量来迭代。
+
+\textbf{Zip 迭代器}
+
+更优雅的技巧是使用 zip 迭代器：
+
+\begin{codebox}[cpp]
+// Chapter Parallel Algorithms/par_iterating_multiple.cpp
+void Process(int a, int b) { }
+std::vector<int> v(100);
+std::vector<int> w(100);
+std::iota(v.begin(), v.end(), 0);
+std::iota(w.begin(), w.end(), 0);
+vec_zipper<int, int> zipped{ v, w };
+std::for_each(std::execution::seq, zipped.begin(), zipped.end(),
+[](std::pair<int&, int&>& twoElements) {
+Process(twoElements.first, twoElements.second);
+}
+);
+\end{codebox}
+
+这个例子使用了一个只适用于 \texttt{std::vector} 的自定义 ZipIterator 实现。你可以把代码写得更通用，或者如果你能使用该库，使用 boost 的 zip 迭代器。ZipIterator 的完整实现在示例“par\_iterating\_multiple.cpp”中。
+
+\textbf{错误的技巧}
+
+同样重要的是提及一个方面：
+
+正如标准在 [algorithms.parallel.exec]\footnote{\url{https://timsong-cpp.github.io/cppwp/n4659/algorithms.parallel\#exec-2}} 中所说：
+
+除非另有说明，对于满足 \texttt{is\_trivially\_copy\_constructible\_v<T>} 且 \texttt{is\_trivially\_destructible\_v<T>} 为真的类型 T，实现可以任意复制序列中的元素。[注：这意味着用户提供的函数对象不应依赖此类输入序列中参数的对象同一性。对于那些函数对象参数的对象同一性很重要的用户，应考虑使用返回非复制实现对象（例如 \texttt{reference\_wrapper<T>}）的包装迭代器或某种等效方案。——结束注]
+
+因此你不能这样写：
+
+\begin{codebox}[cpp]
+vector<int> vec;
+vector <int> other;
+vector <int> external;
+int* beg = vec.data();
+std::transform(std::execution::par,
+vec.begin(), vec.end(), other.begin(),
+[&beg, &external](const int& elem) {
+// use pointer arithmetic
+auto index = &elem - beg;
+return elem * externalVec[index];
+}
+);
+\end{codebox}
+
+上面的代码使用指针算术来查找元素的当前索引。然后我们可以用这个索引访问其他容器。
+
+然而，这个技巧假设 \texttt{elem} 就是容器中确切的元素，而不是它的副本！由于实现可能会复制元素，地址可能完全无关！这个有缺陷的技巧还假设容器把元素存放在连续的内存块中。
+
+只有 \texttt{for\_each} 和 \texttt{for\_each\_n} 保证执行期间元素不会被复制：
+
+实现没有 [algorithms.parallel.exec]\footnote{\url{https://timsong-cpp.github.io/cppwp/n4659/algorithms.parallel.exec}} 所赋予的、对任意复制输入序列元素的自由。
+
+
+\subsection{计数元素}
+
+为了练手，我们来构建一个统计容器中元素个数的算法。我们的算法将是另一个标准算法 \texttt{count\_if} 的一个版本。
+
+主要思路是使用 \texttt{transform\_reduce}——一个新的“融合”算法。它先对元素应用某个一元函数，然后执行归约操作。
+
+要得到满足某谓词的元素个数，我们可以先过滤每个元素（transform）。如果元素通过过滤则返回 1，否则返回 0。然后在归约步骤中，我们统计有多少个元素返回了 1。
+
+下面这张图说明了该算法在一个简单情形下的工作：
+
+\myGraphic{0.9}{images/fig\_p246\_1.png}{并行 count\_if 示例}
+
+\begin{itemize}
+\item 第一步是在 \texttt{transform\_reduce} 算法中执行 transform 步骤。对匹配的元素返回 1，否则返回 0。
+\item 然后用 reduce 步骤计算所有 1 的和。我们有三个值满足条件，因此输出为 3。
+\end{itemize}
+
+代码如下：
+
+\begin{codebox}[cpp]
+// Chapter Parallel Algorithms/par_count_if.cpp
+template <typename Policy, typename Iter, typename Func>
+std::size_t CountIf(Policy policy, Iter first, Iter last, Func predicate)
+{
+return std::transform_reduce(policy,
+first,
+last,
+std::size_t(0),
+std::plus<std::size_t>{},
+[&predicate](const Iter::value_type& v) {
+return predicate(v) ? 1 : 0;
+}
+);
+}
+\end{codebox}
+
+我们可以在如下测试容器上运行它：
+
+\begin{codebox}[cpp]
+// Chapter Parallel Algorithms/par_count_if.cpp
+std::vector<int> v(100);
+std::iota(v.begin(), v.end(), 0);
+auto NumEven = CountIf(std::execution::par, v.begin(), v.end(),
+[](int i) { return i % 2 == 0; }
+);
+std::cout << NumEven << '\n';
+\end{codebox}
+
+要得到字符串中空格的数量：
+
+\begin{codebox}[cpp]
+// Chapter Parallel Algorithms/par_count_if.cpp
+std::string_view sv = "Hello
+Programming
+World";
+auto NumSpaces = CountIf(std::execution::seq, sv.begin(), sv.end(),
+[](char ch) { return ch == ' '; }
+);
+std::cout << NumSpaces << '\n';
+\end{codebox}
+
+甚至可以在 \texttt{map} 上：
+
+\begin{codebox}[cpp]
+// Chapter Parallel Algorithms/par_count_if.cpp
+std::map<std::string, int> CityAndPopulation{
+{"Cracow", 765000},
+{"Warsaw", 1745000},
+{"London", 10313307},
+{"New York", 18593220},
+{"San Diego", 3107034}
+};
+auto NumCitiesLargerThanMillion = CountIf(std::execution::seq,
+CityAndPopulation.begin(), CityAndPopulation.end(),
+[](const std::pair<const std::string, int>& p) {
+return p.second > 1000000;
+}
+);
+std::cout << CitiesLargerThanMillion << '\n';
+\end{codebox}
+
+这个例子使用简单的测试数据，要获得比串行版本更好的性能，数据规模必须显著增大。例如，城市及其人口可以从数据库加载。
+
+
+\subsection{更多示例}
+
+下面是一份清单，列出了并行算法可能有益的另外几种思路：
+\begin{itemize}
+\item 统计——为一组数据计算各种数学属性
+\item 并行逐行处理 CSV 记录
+\item 并行解析文件——每个线程一个文件，或每个线程一个文件块
+\item 计算积分图
+\item 并行矩阵运算
+\item 并行点积
+\end{itemize}
+
+你可以在以下文章中找到更多示例：
+\begin{itemize}
+\item The Amazing Performance of C++17 Parallel Algorithms, is it Possible?\footnote{\url{https://www.bfilipek.com/2018/11/parallel-alg-perf.html}}
+\item How to Boost Performance with Intel Parallel STL and C++17 Parallel Algorithms\footnote{\url{https://www.bfilipek.com/2018/11/pstl.html}}
+\item Examples of Parallel Algorithms From C++17\footnote{\url{https://www.bfilipek.com/2018/06/parstl-tests.html}}
+\item Parallel STL And Filesystem: Files Word Count Example\footnote{\url{https://www.bfilipek.com/2018/07/files-word-count.html}}
+\end{itemize}
+
+
+\section{本章总结}
+
+读完本章后，你应当掌握了关于并行算法的核心知识。我们讨论了执行策略、它们可能在硬件上如何执行，以及有哪些新算法。
+
+目前并行算法展现出了良好的潜力。只需多一个参数，你就能轻松地并行化代码。在此之前，那需要使用某个第三方库，或者自己写一个线程池系统的定制版本。
+
+可以肯定的是，我们需要等待更多可用的实现。目前只有 Visual Studio 让你使用并行算法，而且它只提供并行策略（不向量化）。在 GPU 上执行代码尤其令人感兴趣。
+
+同样值得引用 TS 规范 P0024\footnote{\url{https://wg21.link/P0024}}：
+
+\begin{myQuote}
+并行算法与执行策略只是并行 TS 的起点。我们已经预见到了扩展并行 TS 功能、以提升程序员灵活性与表达力的机会。一个完全实现的执行器（executors）特性将产生新的、灵活的创建执行的方式，包括并行算法的执行。
+\end{myQuote}
+
+需要记住的要点：
+\begin{itemize}
+\item 并行 STL 为你提供了一组 69 个算法，它们都有针对执行策略参数的重载。
+\item 执行策略描述了算法可能如何被执行。
+\item C++17 中有三种执行策略（\texttt{<execution>} 头文件）
+  \begin{itemize}
+  \item \texttt{std::execution::seq}——串行
+  \item \texttt{std::execution::par}——并行
+  \item \texttt{std::execution::par\_unseq}——并行且向量化
+  \end{itemize}
+\item 在并行执行策略中，传给算法的函数对象不能引发死锁和数据竞态
+\item 在并行非顺序（unsequenced）策略中，函数对象不能调用向量化不安全的指令，如内存分配或任何同步机制
+\item 为了处理新的执行模式，还新增了算法：如 \texttt{std::reduce}、\texttt{exclusive\_scan}——它们无序执行，因此操作必须满足结合律才能产生确定性的结果
+\item 还有“融合”算法：\texttt{transform\_reduce}、\texttt{transform\_exclusive\_scan}、\texttt{transform\_inclusive\_scan}，把两个算法组合在一起。
+\end{itemize}
+
+假设并行执行中没有同步点，并行算法应当比串行版本更快。尽管如此，它们做了更多工作——尤其是初始化以及拆分成任务。
+
+实现通常会用某种线程池来在 CPU 上实现并行算法。
+
+
+\section{编译器支持}
+
+截至今天（2018 年 10 月），只有一种编译器/STL 实现支持并行算法：它是 Visual Studio 2017 15.7。MSVC 支持大多数新算法，更多将在后续更新中实现。
+
+Visual Studio 还以相同方式实现 \texttt{par} 和 \texttt{par\_unseq}，因此你不应期望代码运行之间有任何差异。
+
+其他主流编译器 Clang/GCC（以及它们的 STL 实现）正在路上。
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+并行算法 & in progress & in progress & VS 2017 15.7 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+¹⁵ 参见 Announcing: MSVC Conforms to the C++ Standard | Visual C++ Team Blog。
+
+还有其他几种实现：
+\begin{itemize}
+\item Codeplay - SYCL Parallel STL\footnote{\url{http://github.com/KhronosGroup/SyclParallelSTL}}
+\item STE||AR Group - HPX\footnote{\url{http://stellar-group.github.io/hpx/docs/html/hpx/manual/parallel.html}}
+\item Intel - Parallel STL\footnote{\url{https://software.intel.com/en-us/get-started-with-pstl}}——基于 OpenMP 4.0 与 Intel® TBB。
+\item Parallel STL\footnote{\url{https://parallelstl.codeplex.com/}}——Microsoft 针对技术规范（Technical Specification）的早期实现。
+\item n3554 - 提案实现（由 Nvidia 发起）\footnote{\url{https://github.com/n3554/n3554}}
+\item Thibaut Lutz Implementation @Github\footnote{\url{http://github.com/t-lutz/ParallelSTL}}——早期实现。
+\end{itemize}

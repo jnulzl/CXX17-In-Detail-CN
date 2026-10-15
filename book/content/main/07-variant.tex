@@ -1,0 +1,971 @@
+C++17 中另一个实用的包装类型是 \texttt{std::variant}。它是一种类型安全的联合体（union）——你可以存储不同的类型变体，并获得正确的对象生命期保证。这种新类型相比 C 风格的 union 有着巨大的优势。你可以把各种类型都放进去——无论是像 \texttt{int}、\texttt{float} 这样简单的类型，还是像 \texttt{std::vector<std::string>} 这样复杂的实体。在所有情况下，对象都会被正确地初始化和清理。
+
+关键在于，新类型改进了设计模式的实现。例如，你现在可以用更简单的方式，对彼此无关的类型层级使用访问者（visitor）、模式匹配以及运行时多态。
+
+本章你将学习：
+
+\begin{itemize}
+\item union 可能遇到哪些问题
+\item 什么是带标签的联合体（discriminated union），以及为什么 union 需要类型安全
+\item \texttt{std::variant} 如何工作、做了什么
+\item 对 \texttt{std::variant} 的操作
+\item 性能开销与内存需求
+\item 使用示例
+\end{itemize}
+
+\section{基础}
+
+在客户端代码中很少使用 union，大多数时候应当避免使用它。例如，在浮点运算中有一个“常见”的技巧：
+
+\begin{codebox}[cpp]
+union SuperFloat
+{
+float f;
+int i;
+}
+int RawMantissa(SuperFloat f)
+{
+return f.i & ((1 << 23) - 1);
+}
+int RawExponent(SuperFloat f)
+{
+return (f.i >> 23) & 0xFF;
+}
+\end{codebox}
+
+然而，虽然上面的代码在 C99 中可能有效，但由于更严格的别名规则（aliasing rules），它在 C++ 中是未定义行为！
+
+关于这一点，现有的核心指南（Core Guidelines）有一条规则：
+
+\texttt{C.183}：不要用 union 做类型双关（type punning）
+
+原因：用与写入时不同的类型去读取 union 成员是未定义行为。这种双关是隐形的，至少比使用具名转型更难察觉。用 union 做类型双关是错误的一大来源。
+
+在 C++17 之前，如果你想要类型安全的 union，可以使用 \texttt{boost::variant} 或其它第三方库。但现在你有了 \texttt{std::variant}。
+
+下面是一个展示这个新类型能做什么的基础示例：
+
+\begin{codebox}[cpp]
+// Chapter Variant/variant_demo.cpp
+#include <string>
+#include <iostream>
+#include <variant>
+using namespace std;
+// 用于打印当前激活的类型
+struct PrintVisitor
+{
+void operator()(int i) { cout << "int: " << i << '\n'; }
+void operator()(float f) { cout << "float: " << f << '\n'; }
+void operator()(const string& s) { cout << "str: " << s << '\n'; }
+};
+int main()
+{
+variant<int, float, string> intFloatString;
+static_assert(variant_size_v<decltype(intFloatString)> == 3);
+// 默认初始化为第一个候选项，应为 0
+visit(PrintVisitor{}, intFloatString);
+// index 会显示当前使用的“类型”
+cout << "index = " << intFloatString.index() << endl;
+intFloatString = 100.0f;
+cout << "index = " << intFloatString.index() << endl;
+intFloatString = "hello super world";
+cout << "index = " << intFloatString.index() << endl;
+// 尝试使用 get_if：
+if (const auto intPtr = get_if<int>(&intFloatString))
+cout << "int: " << *intPtr << '\n';
+else if (const auto floatPtr = get_if<float>(&intFloatString))
+cout << "float: " << *floatPtr << '\n';
+if (holds_alternative<int>(intFloatString))
+cout << "the variant holds an int!\n";
+else if (holds_alternative<float>(intFloatString))
+cout << "the variant holds a float\n";
+else if (holds_alternative<string>(intFloatString))
+cout << "the variant holds a string\n";
+// try/catch 与 bad_variant_access
+try
+{
+auto f = get<float>(intFloatString);
+cout << "float! " << f << '\n';
+}
+catch (bad_variant_access&)
+{
+cout << "our variant doesn't hold float at this moment...\n";
+}
+}
+\end{codebox}
+
+程序将输出：
+
+\begin{codebox}
+int: 0
+index = 0
+index = 1
+index = 2
+the variant holds a string
+our variant doesn't hold float at this moment...
+\end{codebox}
+
+上面这个例子中有几个要点值得探讨：
+
+\begin{itemize}
+\item 第 18、22 行：如果你没有用一个值来初始化 variant，那么它会用第一个类型来初始化。这种情况下，第一个候选项类型必须拥有默认构造函数。第 22 行会打印出值 0。
+\item 第 25、27、29、31、33、35 行：你可以通过 \texttt{index()} 或 \texttt{holds\_alternative} 检查当前使用的类型。
+\item 第 39、41、47 行：你可以通过 \texttt{get\_if} 或 \texttt{get} 来访问值（可能会抛出 \texttt{bad\_variant\_access} 异常）。
+\item 类型安全——variant 不允许你获取当前未激活类型的值。
+\item 不会发生额外的堆分配。
+\item 第 9、22 行：你可以使用访问者来调用当前激活类型的某个操作。示例中使用了 \texttt{PrintVisitor} 来打印当前激活的值。它是一个带有 \texttt{operator()} 重载的简单结构体。然后这个访问者被传给 \texttt{std::visit} 来执行访问。
+\item variant 类会调用非平凡类型的析构函数和构造函数，因此在示例中，在我们切换到新的变体之前，\texttt{string} 对象会被清理掉。
+\end{itemize}
+
+\subsection{何时使用}
+
+除非你正在做一些底层的、可能只涉及简单类型的工作，否则 union 也许是个可行的选择\footnote{参见 C++ Core Guidelines - Unions，了解 union 有效用法的示例。}。但对于所有其它需要可替代类型的用例，\texttt{std::variant} 才是正道。
+
+一些可能的用途：
+
+\begin{itemize}
+\item 所有那些单个字段可能出现几种类型的地方：比如解析命令行、ini 文件、语言解析器等。
+\item 高效地表达一次计算的若干种可能结果：例如求方程的根。
+\item 错误处理——例如你可以返回 \texttt{variant<Object, ErrorCode>}。如果值可用，就返回 Object，否则赋一个错误码。
+\item 有限状态机。
+\item 无需虚表（vtable）和继承的多态（借助访问者模式）。
+\end{itemize}
+
+\subsection{函数式背景}
+
+同样值得一提的是，variant 类型（也称为带标签的联合体、可辨识联合体或和类型，sum type）源自函数式语言世界与类型论\footnote{\url{https://en.wikipedia.org/wiki/Algebraic_data_type}}。
+
+\section{创建 std::variant}
+
+有几种方式可以创建并初始化 \texttt{std::variant}：
+
+\begin{codebox}[cpp]
+// Chapter Variant/variant_creation.cpp
+// 默认初始化：（第一个类型必须有默认构造函数）
+std::variant<int, float> intFloat;
+std::cout << intFloat.index() << ", val: " << std::get<int>(intFloat) << '\n';
+// 用 monostate 做默认初始化：
+class NotSimple
+{
+public:
+NotSimple(int, float) { }
+};
+// std::variant<NotSimple, int> cannotInit; // error
+std::variant<std::monostate, NotSimple, int> okInit;
+std::cout << okInit.index() << '\n';
+// 传入一个值：
+std::variant<int, float, std::string> intFloatString { 10.5f };
+std::cout << intFloatString.index()
+<< ", value " << std::get<float>(intFloatString) << '\n';
+// 歧义
+// double 可能转换为 float 或 int，因此编译器无法决定
+//std::variant<int, float, std::string> intFloatString { 10.5 };
+// 用 in_place 解决歧义
+variant<long, float, std::string> longFloatString {
+std::in_place_index<1>, 7.6 // double!
+};
+std::cout << longFloatString.index() << ", value "
+<< std::get<float>(longFloatString) << '\n';
+// 为复杂类型使用 in_place
+std::variant<std::vector<int>, std::string> vecStr {
+std::in_place_index<0>, { 0, 1, 2, 3 }
+};
+std::cout << vecStr.index() << ", vector size "
+<< std::get<std::vector<int>>(vecStr).size() << '\n';
+// 从另一个 variant 拷贝初始化：
+std::variant<int, float> intFloatSecond { intFloat };
+std::cout << intFloatSecond.index() << ", value "
+<< std::get<int>(intFloatSecond) << '\n';
+\end{codebox}
+
+在这里把代码玩一玩 @Coliru\footnote{\url{http://coliru.stacked-crooked.com/a/1b930be2da3bd969}}。
+
+\begin{itemize}
+\item 默认情况下，variant 对象会用第一个类型初始化，
+  \begin{itemize}
+  \item 如果该类型没有默认构造函数，从而无法做到，那么你会得到一个编译错误
+  \item 这种情况下你可以使用 \texttt{std::monostate} 作为第一个类型传进去
+  \item monostate 让你能构建出“无值”的 variant，从而表现得类似 \texttt{optional}
+  \end{itemize}
+\item 你可以用一个值来初始化它，此时会使用最匹配的类型
+  \begin{itemize}
+  \item 如果存在歧义，那么你可以使用 \texttt{std::in\_place\_index} 版本来显式指明应当使用哪种类型
+  \end{itemize}
+\item \texttt{std::in\_place} 还允许你创建更复杂的类型，并向构造函数传入更多参数
+\end{itemize}
+
+\subsection{关于 std::monostate}
+
+在示例中，你可能注意到了一个名为 \texttt{std::monostate} 的特殊类型。这是一个空类型，可以配合 variant 用来表示空状态。当第一个候选项没有默认构造函数时，这个类型会很方便。在这种情况下，你可以把 \texttt{std::monostate} 放在第一位（或者你也可以重排类型，找出一个有默认构造函数的类型）。
+
+\subsection{就地构造}
+
+\texttt{std::variant} 有两个可以使用的 in\_place 辅助工具：
+
+\begin{itemize}
+\item \texttt{std::in\_place\_type}——用于指定想要在 variant 中改变/设置的类型
+\item \texttt{std::in\_place\_index}——用于指定想要改变/设置的索引。类型从 0 开始编号。
+  \begin{itemize}
+  \item 在 variant \texttt{std::variant<int, float, std::string>} 中——\texttt{int} 的索引是 0，\texttt{float} 的索引是 1，\texttt{string} 的索引是 2。这个索引与 \texttt{variant::index} 方法返回的值相同。
+  \end{itemize}
+\end{itemize}
+
+好在，你并不总需要使用这些辅助工具来创建 variant。它足够智能，能够识别是否可以从传入的单个参数构造：
+
+\begin{codebox}[cpp]
+// 这会构造第二个/float：
+std::variant<int, float, std::string> intFloatString { 10.5f };
+\end{codebox}
+
+对于 variant，我们至少在两种情况下需要这些辅助工具：
+
+\begin{itemize}
+\item 歧义——用来区分在多个可匹配类型中应当创建哪一个
+\item 高效地创建复杂类型（与 \texttt{optional} 类似）
+\end{itemize}
+
+\textbf{歧义}
+
+如果你写了这样的初始化：
+
+\begin{codebox}[cpp]
+std::variant<int, float> intFloat { 10.5 }; // 从 double 转换？
+\end{codebox}
+
+值 10.5 既可以被转换为 \texttt{int}，也可以被转换为 \texttt{float}，编译器不知道该应用哪种转换。不过它可能会报好几页的编译错误。
+
+但你可以通过指明想要创建的类型来轻松处理这类错误：
+
+\begin{codebox}[cpp]
+std::variant<int, float> intFloat { std::in_place_index<0>, 10.5f };
+// 或
+std::variant<int, float> intFloat { std::in_place_type<int>, 10.5f };
+\end{codebox}
+
+\textbf{复杂类型}
+
+与 \texttt{std::optional} 类似，如果你想高效地创建需要多个构造参数的对象，那就使用 \texttt{std::in\_place*}：
+
+例如：
+
+\begin{codebox}[cpp]
+std::variant<std::vector<int>, std::string> vecStr {
+std::in_place_index<0>, { 0, 1, 2, 3 } // 初始化列表被传入 vector
+};
+\end{codebox}
+
+\section{修改值}
+
+有四种方式可以修改 variant 的当前值：
+
+\begin{itemize}
+\item 赋值运算符
+\item \texttt{emplace}
+\item \texttt{get} 然后为当前激活的类型赋一个新值
+\item 访问者（你不能改变类型，但可以改变当前候选项的值）
+\end{itemize}
+
+重要的是要知道，一切都是类型安全的，而且对象的生命期也得到了尊重。
+
+\begin{codebox}[cpp]
+// Chapter Variant/variant_changing_values.cpp
+std::variant<int, float, std::string> intFloatString { "Hello" };
+intFloatString = 10; // 现在我们是一个 int
+intFloatString.emplace<2>(std::string("Hello")); // 现在我们又是一个 string
+// std::get 返回引用，因此你可以修改其值：
+std::get<std::string>(intFloatString) += std::string(" World");
+intFloatString = 10.1f;
+if (auto pFloat = std::get_if<float>(&intFloatString); pFloat)
+*pFloat *= 2.0f;
+\end{codebox}
+
+\subsection{对象生命期}
+
+当你使用 union 时，你需要管理内部状态：调用构造函数或析构函数。这很容易出错，也很容易搬起石头砸自己的脚。但 \texttt{std::variant} 会按你的预期管理对象生命期。这意味着，当它准备改变当前存储的类型时，会调用底层类型的析构函数。
+
+\begin{codebox}[cpp]
+std::variant<std::string, int> v { "Hello A Quite Long String" };
+// v 为 string 分配了一些内存
+v = 10; // 我们调用了 string 的析构函数！
+// 没有内存泄漏
+\end{codebox}
+
+或者看这个带有自定义类型的示例：
+
+\begin{codebox}[cpp]
+// Chapter Variant/variant_lifetime.cpp
+class MyType
+{
+public:
+MyType() { std::cout << "MyType::MyType\n"; }
+~MyType() { std::cout << "MyType::~MyType\n"; }
+};
+class OtherType
+{
+public:
+OtherType() { std::cout << "OtherType::OtherType\n"; }
+~OtherType() { std::cout << "OtherType::~OtherType\n"; }
+};
+int main()
+{
+std::variant<MyType, OtherType> v;
+v = OtherType();
+return 0;
+}
+\end{codebox}
+
+这将产生如下输出：
+
+\begin{codebox}
+MyType::MyType
+OtherType::OtherType
+MyType::~MyType
+OtherType::~OtherType
+OtherType::~OtherType
+\end{codebox}
+
+在最开始，我们用 \texttt{MyType} 类型的默认值初始化；然后我们用一个 \texttt{OtherType} 实例来改变这个值，在赋值之前，会调用 \texttt{MyType} 的析构函数。随后我们销毁临时对象以及存储在 variant 中的对象。
+
+\section{访问存储的值}
+
+从你到目前为止看到的所有示例来看，你可能已经对如何访问值有了概念。但让我们对这一重要操作做个总结。
+
+首先，即使你知道当前激活的是哪种类型，你也不能这样做：
+
+\begin{codebox}[cpp]
+std::variant<int, float, std::string> intFloatString { "Hello" };
+std::string s = intFloatString;
+// error: conversion from
+// 'std::variant<int, float, std::string>'
+// to non-scalar type 'std::string' requested
+// std::string s = intFloatString;
+\end{codebox}
+
+所以你必须使用辅助函数来访问值。
+
+你可以使用 \texttt{std::get<Type|Index>(variant)}，它是一个非成员函数。如果目标类型处于激活状态，它会返回该类型的引用（你可以传入类型或索引）。否则你会得到 \texttt{std::bad\_variant\_access} 异常。
+
+\begin{codebox}[cpp]
+std::variant<int, float, std::string> intFloatString;
+try
+{
+auto f = std::get<float>(intFloatString);
+std::cout << "float! " << f << '\n';
+}
+catch (std::bad_variant_access&)
+{
+std::cout << "our variant doesn't hold float at this moment...\n";
+}
+\end{codebox}
+
+下一个选项是 \texttt{std::get\_if}。这个函数也是非成员的，并且不会抛出异常。它返回指向激活类型的指针，或者 \texttt{nullptr}。\texttt{std::get} 需要 variant 的引用，而 \texttt{std::get\_if} 接受指针。
+
+\begin{codebox}[cpp]
+if (const auto intPtr = std::get_if<0>(&intFloatString))
+std::cout << "int!" << *intPtr << '\n';
+\end{codebox}
+
+不过，访问 variant 内部值最重要的方式大概还是使用访问者。
+
+\section{用于 std::variant 的访问者}
+
+随着 \texttt{std::variant} 的引入，我们还得到了一个便捷的 STL 函数 \texttt{std::visit}。它可以在所有传入的 variant 上调用给定的“访问者”。
+
+声明如下：
+
+\begin{codebox}[cpp]
+template <class Visitor, class... Variants>
+constexpr visit(Visitor&& vis, Variants&&... vars);
+\end{codebox}
+
+它会在 variant 的当前激活类型上调用 \texttt{vis}。
+
+如果你只传入一个 variant，那么你必须为该 variant 中的类型准备好相应的重载。如果你传入两个 variant，那么你必须为你所传入 variant 的所有可能类型组合准备好重载。
+
+访问者就是“一个可调用对象，它接受来自每个 variant 的每一种可能候选项”。
+
+来看一些示例：
+
+\begin{codebox}[cpp]
+// 一个泛型 lambda：
+auto PrintVisitor = [](const auto& t) { std::cout << t << '\n'; };
+std::variant<int, float, std::string> intFloatString { "Hello" };
+std::visit(PrintVisitor, intFloatString);
+\end{codebox}
+
+在上面的示例中，使用了泛型 lambda 来生成所有可能的重载。由于 variant 中的所有类型都支持 \texttt{<<}（流输出运算符），我们就能把它们打印出来。
+
+在另一个例子中，我们可以用访问者来改变值：
+
+\begin{codebox}[cpp]
+auto PrintVisitor = [](const auto& t) { std::cout << t << '\n'; };
+auto TwiceMoreVisitor = [](auto& t) { t*= 2; };
+std::variant<int, float> intFloat { 20.4f };
+std::visit(PrintVisitor, intFloat);
+std::visit(TwiceMoreVisitor, intFloat);
+std::visit(PrintVisitor, intFloat);
+\end{codebox}
+
+泛型 lambda 只有在我们的类型共享相同的“接口”时才能工作，但在大多数情况下，我们希望根据激活的类型执行不同的操作。
+
+这就是为什么我们可以定义一个带有多个 \texttt{operator()} 重载的结构体：
+
+\begin{codebox}[cpp]
+struct MultiplyVisitor
+{
+float mFactor;
+MultiplyVisitor(float factor) : mFactor(factor) { }
+void operator()(int& i) const {
+i *= static_cast<int>(mFactor);
+}
+void operator()(float& f) const {
+f *= mFactor;
+}
+void operator()(std::string& ) const {
+// nothing to do here...
+}
+};
+std::visit(MultiplyVisitor(0.5f), intFloat);
+std::visit(PrintVisitor, intFloat);
+\end{codebox}
+
+在示例中你会注意到，\texttt{MultiplyVisitor} 使用了一个状态来保存期望的缩放因子值。这为访问提供了很多可能性。
+
+使用 lambda 时，我们习惯了把东西直接声明在使用的位置附近。而当你需要编写一个独立的结构体时，就得离开那个局部作用域。这就是为什么使用 overload 构造会很方便。
+
+\subsection{Overload}
+
+借助这个工具，你可以把所有匹配类型的 lambda 写在一个地方：
+
+\begin{codebox}[cpp]
+std::variant<int, float, std::string> myVariant;
+std::visit(
+overload {
+[](const int& i) { std::cout << "int: " << i; },
+[](const std::string& s) { std::cout << "string: " << s; },
+[](const float& f) { std::cout << "float: " << f; }
+},
+myVariant
+);
+\end{codebox}
+
+目前这个辅助工具还不是标准库的一部分（可能会在 C++20 中加入）。你可以用下面的代码实现它：
+
+\begin{codebox}[cpp]
+template<class... Ts> struct overload : Ts... { using Ts::operator()...; };
+template<class... Ts> overload(Ts...) -> overload<Ts...>;
+\end{codebox}
+
+这段代码创建了一个继承自各个 lambda 的结构体，并使用它们的 \texttt{Ts::operator()}。整个结构体现在可以被传给 \texttt{std::visit}——它会从中选出合适的重载。
+
+overload 用到了三个 C++17 特性：
+
+\begin{itemize}
+\item using 声明中的包展开（pack expansions）——配合可变参数模板的简短紧凑语法。
+\item 自定义的模板实参推导规则——这让编译器能够推导出作为该模式基类的 lambda 的类型。没有它的话，我们就得定义一个“make”函数。
+\item 对聚合初始化（aggregate initialisation）的扩展——overload 模式使用聚合初始化来初始化基类。在 C++17 之前这是不可能的。
+\end{itemize}
+
+这里是另一个使用它的示例：
+
+\begin{codebox}[cpp]
+// Chapter Variant/variant_overload.cpp
+std::variant<int, float, std::string> intFloatString { "Hello" };
+std::visit(overload{
+[](int& i) { i*= 2; },
+[](float& f) { f*= 2.0f; },
+[](std::string& s) { s = s + s; }
+}, intFloatString);
+std::visit(PrintVisitor, intFloatString);
+// prints: "HelloHello"
+\end{codebox}
+
+关于 \texttt{std::overload} 提案的论文是：P0051 - C++ generic overload function\footnote{\url{https://wg21.link/p0051r3}}。
+
+你还可以在 bfilipek.com 上的这篇博客文章中读到更多关于 overload 模式机制的细节：2 Lines Of Code and 3 C++17 Features - The overload Pattern\footnote{\url{https://www.bfilipek.com/2019/02/2lines3featuresoverload.html}}。
+
+\subsection{访问多个 variant}
+
+\texttt{std::visit} 允许你不仅访问一个 variant，还可以在同一次调用中访问多个。不过重要的是要知道，对于多个 variant，你必须实现接受与输入 variant 数量相同参数个数的函数重载。而且你必须提供所有可能的类型组合。
+
+例如对于：
+
+\begin{codebox}[cpp]
+std::variant<int, float, char> v1 { 's' };
+std::variant<int, float, char> v2 { 10 };
+\end{codebox}
+
+如果你对这两个 variant 调用 \texttt{std::visit}，就必须提供 9 个函数重载：
+
+\begin{codebox}[cpp]
+std::visit(overload{
+[](int a, int b) { },
+[](int a, float b) { },
+[](int a, char b) { },
+[](float a, int b) { },
+[](float a, float b) { },
+[](float a, char b) { },
+[](char a, int b) { },
+[](char a, float b) { },
+[](char a, char b) { }
+}, v1, v2);
+\end{codebox}
+
+如果你漏掉一个重载，编译器就会报错。
+
+看看下面的示例，其中每个 variant 代表一种食材，我们想把其中两种组合在一起：
+
+\begin{codebox}[cpp]
+// Chapter Variant/visit_multiple.cpp
+#include <iostream>
+#include <variant>
+template<class... Ts> struct overload : Ts... { using Ts::operator()...; };
+template<class... Ts> overload(Ts...) -> overload<Ts...>;
+struct Pizza { };
+struct Chocolate { };
+struct Salami { };
+struct IceCream { };
+int main() {
+std::variant<Pizza, Chocolate, Salami, IceCream> firstIngredient { IceCream() };
+std::variant<Pizza, Chocolate, Salami, IceCream> secondIngredient { Chocolate() };
+std::visit(overload{
+[](const Pizza& p, const Salami& s) {
+std::cout << "here you have, Pizza with Salami!\n";
+},
+[](const Salami& s, const Pizza& p) {
+std::cout << "here you have, Pizza with Salami!\n";
+},
+[](const Chocolate& c, const IceCream& i) {
+std::cout << "Chocolate with IceCream!\n";
+},
+[](const IceCream& i, const Chocolate& c) {
+std::cout << "IceCream with a bit of Chocolate!\n";
+},
+[](const auto& a, const auto& b) {
+std::cout << "invalid composition...\n";
+},
+}, firstIngredient, secondIngredient);
+return 0;
+}
+\end{codebox}
+
+程序将输出：\texttt{IceCream with a bit of Chocolate!}
+
+上面的代码使用了 overload，并且用的是多个 lambda，而不是一个带有 \texttt{operator()} 重载的独立结构体。
+
+有趣的是，这个示例只实现了“有效”食材组合，而“其余情况”由泛型 lambda（来自 C++14）处理。
+
+一个泛型 lambda \texttt{[](const auto\& a, const auto\& b) \{ \}} 等价于下面这个可调用类型：
+
+\begin{codebox}[cpp]
+class UnnamedUniqueClass // << 编译器特定的名字...
+{
+public:
+template<typename T, typename U>
+auto operator () (const T& a, const T& b) const {
+}
+};
+\end{codebox}
+
+示例中使用的泛型 lambda 会为所有剩余的食材类型提供函数重载，由于它是一个模板，在决定最佳可行函数时，它总是排在具象重载（带有具体类型的 lambda）之后。
+
+\section{其它 std::variant 操作}
+
+为了完整起见：
+
+\begin{itemize}
+\item 你可以比较同类型的两个 variant：
+  \begin{itemize}
+  \item 如果它们包含相同的激活候选项，则调用相应的比较运算符。
+  \item 如果一个 variant 拥有“更早”的候选项，那么它就“小于”拥有下一个激活候选项的 variant。
+  \end{itemize}
+\item variant 是一种值类型，所以你可以移动它。
+\item 也可以对 variant 使用 \texttt{std::hash}。
+\end{itemize}
+
+\section{异常安全保证}
+
+到目前为止一切看起来都很顺利……但当在 variant 中创建候选项时发生异常会怎样？
+
+例如：
+
+\begin{codebox}[cpp]
+// Chapter Variant/variant_valueless.cpp
+class ThrowingClass
+{
+public:
+explicit ThrowingClass(int i) { if (i == 0) throw int (10); }
+operator int () { throw int(10); }
+};
+int main(int argc, char** argv)
+{
+std::variant<int, ThrowingClass> v;
+// 修改值：
+try
+{
+v = ThrowingClass(0);
+}
+catch (...)
+{
+std::cout << "catch(...)\n";
+// 我们保留了旧状态！
+std::cout << v.valueless_by_exception() << '\n';
+std::cout << std::get<int>(v) << '\n';
+}
+// 在 emplace 内部
+try
+{
+v.emplace<0>(ThrowingClass(10)); // 调用 operator int
+}
+catch (...)
+{
+std::cout << "catch(...)\n";
+// 旧状态已被销毁，因此我们不处于无效状态！
+std::cout << v.valueless_by_exception() << '\n';
+}
+return 0;
+}
+\end{codebox}
+
+在第一种情况——使用赋值运算符——异常是在该类型的构造函数中抛出的。这发生在 variant 中旧值被替换之前，因此 variant 的状态没有改变。如你所见，我们仍然可以访问 \texttt{int} 并打印它。
+
+然而在第二种情况——\texttt{emplace}——异常是在 variant 的旧状态被销毁之后抛出的。\texttt{emplace} 调用 \texttt{operator int} 来替换值，但它抛出了异常。此后，variant 处于错误的状态，我们无法恢复之前的状态。
+
+还要注意，一个“因异常而无值（valueless by exception）”的 variant 处于无效状态。无法从这样的 variant 访问值。这就是为什么 \texttt{variant::index} 会返回 \texttt{variant\_npos}，而 \texttt{std::get} 和 \texttt{std::visit} 会抛出 \texttt{bad\_variant\_access}。
+
+\section{性能与内存考量}
+
+\texttt{std::variant} 使用和 union 类似的方式来占用内存：它会取底层类型的最大尺寸。但由于我们需要某种东西来知道当前激活的是哪个候选项，就需要多占用一些空间。此外，一切都需要遵循对齐规则。
+
+下面是一些基本的大小：
+
+\begin{codebox}[cpp]
+// Chapter Variant/variant_sizeof.cpp
+std::cout << "sizeof string: "
+<< sizeof(std::string) << '\n';
+std::cout << "sizeof variant<int, string>: "
+<< sizeof(std::variant<int, std::string>) << '\n';
+std::cout << "sizeof variant<int, float>: "
+<< sizeof(std::variant<int, float>) << '\n';
+std::cout << "sizeof variant<int, double>: "
+<< sizeof(std::variant<int, double>) << '\n';
+\end{codebox}
+
+在 GCC 8.1、32 位下：
+
+\begin{codebox}
+sizeof string: 32
+sizeof variant<int, string>: 40
+sizeof variant<int, float>: 8
+sizeof variant<int, double>: 16
+\end{codebox}
+
+更有趣的是，\texttt{std::variant} 不会分配任何额外的空间！不会为了持有 variant 或判别器而发生动态分配。
+
+为了拥有一个安全的求和类型，你要付出内存占用增大的代价。多出来的比特可能会影响 CPU 缓存。因此，对你应用中使用 variant 的热点代码，你可能想做一些基准测试。
+
+\section{从 boost::variant 迁移}
+
+Boost Variant 大约在 2004 年引入，所以在 \texttt{std::variant} 加入标准之前，它已经有了 13 年的经验积累。STL 中的这个类型汲取了 boost 版本的经验并做了改进。
+
+主要变化如下：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{l X X}
+\toprule
+特性 & Boost.Variant (1.67.0) & std::variant \\
+\midrule
+额外内存分配 & 赋值时可能发生（参见设计概述） & 从不 \\
+空状态⁷ & 否 & 是 \\
+访问（visiting） & \texttt{apply\_visitor} & \texttt{std::visit} \\
+按下标访问 & 否 & 是 \\
+递归 variant & 是（参见 \texttt{make\_recursive\_variant}⁸） & 否 \\
+重复项 & 否 & 是 \\
+空的可选项 & \texttt{boost::blank} & \texttt{std::monostate} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\noindent ⁷ \url{https://www.boost.org/doc/libs/1_67_0/doc/html/variant/design.html}
+
+\noindent ⁸ \url{https://www.boost.org/doc/libs/1_67_0/doc/html/boost/make_recursive_variant.html}
+
+\section{std::variant 示例}
+
+在了解了 \texttt{std::variant} 的大部分细节之后，我们现在可以探究几个示例了。
+
+\subsection{错误处理}
+
+基本思想是：用某个 ErrorCode 把可能的返回类型包起来，从而让函数输出更多关于错误的信息。无需使用异常或输出参数。这类似于 \texttt{std::expected}——一个计划在未来 C++ 标准中引入的新类型。
+
+\begin{codebox}[cpp]
+// Chapter Variant/variant_error_handling.cpp
+enum class ErrorCode
+{
+Ok,
+SystemError,
+IoError,
+NetworkError
+};
+std::variant<std::string, ErrorCode> FetchNameFromNetwork(int i)
+{
+if (i == 0)
+return ErrorCode::SystemError;
+if (i == 1)
+return ErrorCode::NetworkError;
+return std::string("Hello World!");
+}
+int main()
+{
+auto response = FetchNameFromNetwork(0);
+if (std::holds_alternative<std::string>(response))
+std::cout << std::get<std::string>(response) << "\n";
+else
+std::cout << "Error!\n";
+response = FetchNameFromNetwork(10);
+if (std::holds_alternative<std::string>(response))
+std::cout << std::get<std::string>(response) << "\n";
+else
+std::cout << "Error!\n";
+return 0;
+}
+\end{codebox}
+
+在示例中，返回的是 ErrorCode 或一个常规类型。
+
+\subsection{解析命令行}
+
+命令行可能包含可以被多种方式解释的文本参数：
+
+\begin{itemize}
+\item 作为整数
+\item 作为浮点数
+\item 作为布尔标志
+\item 作为字符串（不解析）
+\item ……
+\end{itemize}
+
+我们可以构建一个能持有所有可能选项的 variant。
+
+下面是一个 \texttt{int}、\texttt{float} 和 \texttt{string} 的简单版本：
+
+\begin{codebox}[cpp]
+// Chapter Variant/variant_parsing_int_float.cpp
+class CmdLine
+{
+public:
+using Arg = std::variant<int, float, std::string>;
+private:
+std::map<std::string, Arg> mParsedArgs;
+public:
+explicit CmdLine(int argc, const char** argv) { ParseArgs(argc, argv); }
+std::optional<Arg> Find(const std::string& name) const;
+// ...
+};
+\end{codebox}
+
+解析代码如下：
+
+\begin{codebox}[cpp]
+// Chapter Variant/variant_parsing_int_float.cpp
+CmdLine::Arg TryParseString(std::string_view sv)
+{
+// 先尝试按 float 解析
+float fResult = 0.0f;
+const auto last = sv.data() + sv.size();
+const auto res = std::from_chars(sv.data(), last, fResult);
+if (res.ec != std::errc{} || res.ptr != last)
+{
+// 如果做不到，就假定它是 string
+return std::string{sv};
+}
+// 没有小数部分？那就转换为整数
+if (static_cast<int>(fResult) == fResult)
+return static_cast<int>(fResult);
+return fResult;
+}
+void CmdLine::ParseArgs(int argc, const char** argv)
+{
+// 形式：-argName value -argName value
+for (int i = 1; i < argc; i+=2)
+{
+if (argv[i][0] != '-') // 超级高级的模式匹配！ :)
+throw std::runtime_error("wrong command name");
+mParsedArgs[argv[i]+1] = TryParseString(argv[i+1]);
+}
+}
+\end{codebox}
+
+在撰写本文时，GCC/Clang 中的 \texttt{std::from\_chars} 只支持整数。MSVC 2017 15.8 则对浮点数也有完整支持。你可以在独立的“字符串转换”一章中阅读更多关于 \texttt{from\_chars} 的内容。
+
+\texttt{TryParseString} 的思路是尝试把输入字符串解析成最匹配的类型。所以如果它看起来像整数，我们就尝试取一个整数。否则，我们就返回一个未解析的字符串。当然，我们可以扩展这种做法。
+
+解析完成后，客户端可以使用 \texttt{Find()} 方法来检查某个参数是否存在：
+
+\begin{codebox}[cpp]
+std::optional<CmdLine::Arg> CmdLine::Find(const std::string& name) const
+{
+if (const auto it = mParsedArgs.find(name); it != mParsedArgs.end())
+return it->second;
+return { };
+}
+\end{codebox}
+
+\texttt{Find()} 使用 \texttt{std::optional} 来返回值。如果在 map 中找不到该参数，客户端就会得到一个空的 optional。
+
+我们如何使用它的示例：
+
+\begin{codebox}[cpp]
+// Chapter Variant/variant_parsing_int_float.cpp
+try
+{
+CmdLine cmdLine(argc, argv);
+if (auto arg = cmdLine.Find("paramInt"); arg)
+std::cout << "paramInt is " << std::get<int>(*arg) << '\n';
+if (auto arg = cmdLine.Find("paramFloat"); arg)
+{
+if (const auto intPtr = std::get_if<int>(&*arg); intPtr)
+std::cout << "paramFloat is " << *intPtr << " (integer)\n";
+else
+std::cout << "paramFloat is " << std::get<float>(*arg) << '\n';
+}
+if (auto arg = cmdLine.Find("paramText"); arg)
+std::cout << "paramText is " << std::get<std::string>(*arg) << '\n';
+}
+catch (std::bad_variant_access& err)
+{
+std::cerr << " ...err: accessing a wrong variant type, "
+<< err.what() << '\n';
+}
+catch (std::runtime_error &err)
+{
+std::cerr << " ...err: " << err.what() << '\n';
+}
+\end{codebox}
+
+上面的示例使用 \texttt{cmdLine.Find()} 来检查是否存在给定参数。它返回 \texttt{std::optional}，因此我们必须检查它是否为空。当我们确定参数可用时，就可以检查它的类型。
+
+\texttt{CmdLine} 会尝试找到最匹配的类型，例如对于浮点数，我们存在歧义——因为 90 也是 float，但代码会把它存为 int（因为它没有小数部分）。
+
+要解决这类歧义，我们可以传入一些关于期望类型的额外信息，或者提供某些辅助方法。
+
+\subsection{解析配置文件}
+
+这个想法来自前面命令行的示例。在配置文件的情况下，我们通常处理的是 \texttt{<Name, Value>} 这样的键值对。其中 Value 可能是不同的类型：\texttt{string}、\texttt{int}、\texttt{array}、\texttt{bool}、\texttt{float} 等等。
+
+对于这样的用例，甚至可以用 \texttt{void*} 来持有这种未知类型。但这种模式极其容易出错。如果我们已知所有可能的类型，就可以用 \texttt{std::variant} 来改进设计，或者借助 \texttt{std::any}。
+
+\subsection{状态机}
+
+如何建模一个状态机？例如门的状态：
+
+\myGraphic{0.9}{images/fig\_p133\_1.png}{（门状态机示意图）}
+
+我们可以使用不同类型的状态，并把访问者用作事件：
+
+\begin{codebox}[cpp]
+// Chapter Variant/variant_fsm.cpp
+struct DoorState
+{
+struct DoorOpened {};
+struct DoorClosed {};
+struct DoorLocked {};
+using State = std::variant<DoorOpened, DoorClosed, DoorLocked>;
+void open()
+{
+m_state = std::visit(OpenEvent{}, m_state);
+}
+void close()
+{
+m_state = std::visit(CloseEvent{}, m_state);
+}
+void lock()
+{
+m_state = std::visit(LockEvent{}, m_state);
+}
+void unlock()
+{
+m_state = std::visit(UnlockEvent{}, m_state);
+}
+State m_state;
+};
+\end{codebox}
+
+这里是相应的事件：
+
+\begin{codebox}[cpp]
+// Chapter Variant/variant_fsm.cpp
+struct OpenEvent
+{
+State operator()(const DoorOpened&){ return DoorOpened(); }
+State operator()(const DoorClosed&){ return DoorOpened(); }
+// 无法打开已锁上的门
+State operator()(const DoorLocked&){ return DoorLocked(); }
+};
+struct CloseEvent
+{
+State operator()(const DoorOpened&){ return DoorClosed(); }
+State operator()(const DoorClosed&){ return DoorClosed(); }
+State operator()(const DoorLocked&){ return DoorLocked(); }
+};
+struct LockEvent
+{
+// 无法锁上已打开的门
+State operator()(const DoorOpened&){ return DoorOpened(); }
+State operator()(const DoorClosed&){ return DoorLocked(); }
+State operator()(const DoorLocked&){ return DoorLocked(); }
+};
+struct UnlockEvent
+{
+// 无法解锁已打开的门
+State operator()(const DoorOpened&){ return DoorOpened(); }
+State operator()(const DoorClosed&){ return DoorClosed(); }
+// 解锁
+State operator()(const DoorLocked&){ return DoorClosed(); }
+};
+\end{codebox}
+
+\subsection{多态}
+
+在 C++ 中，大多数时候我们可以安全地使用基于虚表（vtable）方式的运行时多态。你有一组共享相同接口的相关类型，并且有一个定义良好的虚函数可供调用。
+
+但如果你有“互不相干”的类型，它们并不共享同一个基类，那该怎么办？如果你希望快速添加新功能，又不想改动所支持类型的代码，那又该怎么办？
+
+借助 \texttt{std::variant} 和 \texttt{std::visit}，我们可以构建如下示例：
+
+\begin{codebox}[cpp]
+// Chapter Variant/variant_polymorphism.cpp
+class Triangle
+{
+public:
+void Render()
+{ std::cout << "Drawing a triangle!\n"; }
+};
+class Polygon
+{
+public:
+void Render() { std::cout << "Drawing a polygon!\n"; }
+};
+class Sphere
+{
+public:
+void Render() { std::cout << "Drawing a sphere!\n"; }
+};
+int main()
+{
+std::vector<std::variant<Triangle, Polygon, Sphere>> objects {
+Polygon(),
+Triangle(),
+Sphere(),
+Triangle()
+};
+auto CallRender = [](auto& obj) { obj.Render(); };
+for (auto& obj : objects)
+std::visit(CallRender, obj);
+}
+\end{codebox}
+
+上面的示例只展示了从互不相干的类型调用方法的第一种情况。它把所有可能出现的形状类型包装进一个 variant，然后使用访问者把调用分派到正确的类型。
+
+例如，如果你想对对象排序，那么可以编写另一个持有某些状态的访问者。这样一来，无需改动这些类型，你就能获得更多功能。

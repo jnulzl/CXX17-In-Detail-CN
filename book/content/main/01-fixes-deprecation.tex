@@ -1,0 +1,294 @@
+C++17 标准如今已超过 1600 页，相比 C++14\footnote{例如，对比 2017 年 7 月的草案 N4687 与 C++14 草案 N4140。} 增加了 200 多页！所幸，语言规范在几处做了清理，一些陈旧或潜在有问题的特性得以清除。
+
+本章你将了解：
+\begin{itemize}
+\item 从语言中移除了哪些内容，例如：\texttt{register} 关键字、\texttt{auto\_ptr} 和 \texttt{std::random\_shuffle}。
+\item 哪些特性现在已被弃用，并将在未来的语言版本中被移除。
+\item 修复了哪些问题，尤其是带花括号初始化的 \texttt{auto} 类型推导。
+\end{itemize}
+
+\section{被移除的内容}
+
+C++ 每一次迭代背后的一个核心理念，就是与前一版本保持兼容。我们希望语言中加入新东西，但同时，旧有项目仍应能编译通过。不过，有些极少使用或存在错误的部分还是有机会被移除的。本节将简要说明标准中移除了哪些内容。
+
+\subsection{移除 auto\_ptr}
+
+这可能是所有消息中最好的一个！
+
+C++98 引入了 \texttt{auto\_ptr}，作为为裸指针提供基本 RAII 特性的一种手段。然而，由于语言缺乏移动语义，这种智能指针很容易被误用，并引发运行时错误。
+
+下面是一个 \texttt{auto\_ptr} 可能导致崩溃的例子：
+
+\begin{codebox}[cpp]
+// Chapter Fixes And Deprecation/auto_ptrCrash.cpp
+void doSomething(std::auto_ptr<int> myPtr)
+{
+*myPtr = 11;
+}
+void AutoPtrTest() {
+std::auto_ptr<int> myTest(new int(10));
+doSomething(myTest);
+*myTest = 12;
+}
+\end{codebox}
+
+\texttt{doSomething()} 按值接收指针，但由于它不是共享指针，它会取得所管理对象的独占所有权。随后当函数结束时，该指针副本离开作用域，对象被销毁。
+
+在 \texttt{AutoPtrTest()} 中，\texttt{doSomething} 执行完毕后指针已被清理，于是你将得到未定义行为，甚至可能崩溃！
+
+C++11 带来了智能指针：\texttt{unique\_ptr}、\texttt{shared\_ptr} 和 \texttt{weak\_ptr}。借助移动语义，语言终于能正确地支持独占资源的转移。此外，新的智能指针可以存入标准容器，而 \texttt{auto\_ptr} 做不到这一点。你应当用 \texttt{unique\_ptr} 替换 \texttt{auto\_ptr}，因为它正是 \texttt{auto\_ptr} 最直接、最合适的替代品。
+
+新的智能指针比 \texttt{auto\_ptr} 强大得多也更安全，因此 \texttt{auto\_ptr} 自 C++11 起就被弃用了。编译器应当报告一个警告：
+
+\begin{codebox}[cpp]
+warning: 'template<class> class std::auto_ptr' is deprecated
+\end{codebox}
+
+如今，当你使用符合标准的 C++17 编译器编译时，会得到错误。下面是使用 \texttt{/std:c++latest} 时在 MSVC 2017 中出现的错误：
+
+\begin{codebox}[cpp]
+error C2039: 'auto_ptr': is not a member of 'std'
+\end{codebox}
+
+如果你在把 \texttt{auto\_ptr} 转换为 \texttt{unique\_ptr} 时需要帮助，可以试试 Clang Tidy，它提供了自动转换：Clang Tidy: modernize-replace-auto-ptr\footnote{\url{https://clang.llvm.org/extra/clang-tidy/checks/modernize-replace-auto-ptr.html}}。
+
+\begin{myInfoBox}
+该变更由 N4190\footnote{\url{https://wg21.link/n4190}} 提出。
+\end{myInfoBox}
+
+\subsection{移除 register 关键字}
+
+\texttt{register} 关键字在 2011 年（C++11）即被弃用，自那时起便不再有任何含义。如今它正被移除。该关键字被保留，未来标准修订中可能另作他用（例如 \texttt{auto} 关键字就被重新启用，如今成了一个全新且强大的特性）。
+
+如果你用 \texttt{register} 声明一个变量：
+
+\begin{codebox}[cpp]
+register int a;
+\end{codebox}
+
+你可能会收到如下警告（以下为 GCC 8.1）：
+
+\begin{codebox}[cpp]
+warning: ISO C++17 does not allow 'register' storage class specifier
+\end{codebox}
+
+或者在 Clang（Clang 7.0）中会得到错误：
+
+\begin{codebox}[cpp]
+error: ISO C++17 does not allow 'register' storage class specifier
+\end{codebox}
+
+\begin{myInfoBox}
+该变更由 P0001R1\footnote{\url{https://wg21.link/p0001r1}} 提出。
+\end{myInfoBox}
+
+\subsection{移除弃用的 operator++(bool)}
+
+这个运算符被弃用已经很久了！委员会早在 1998 年（C++98）就建议不要使用它，但直到现在才终于同意将其从语言中移除。
+
+如果你尝试编写如下代码：
+
+\begin{codebox}[cpp]
+bool b;
+b++;
+\end{codebox}
+
+你应当会收到类似下面来自 GCC（GCC 8.1）的错误：
+
+\begin{codebox}[cpp]
+error: use of an operand of type 'bool' in 'operator++' is forbidden in C++17
+\end{codebox}
+
+\begin{myInfoBox}
+该变更由 P0002R1\footnote{\url{https://wg21.link/p0002r1}} 提出。
+\end{myInfoBox}
+
+\subsection{移除弃用的异常规格说明}
+
+在 C++17 中，异常规格说明将成为类型系统的一部分（关于这一点，将在下一章“语言澄清”中讨论）。不过，标准里仍保留着一些老旧、已被弃用、且被证明不实用也无人使用的异常规格说明。
+
+例如：
+
+\begin{codebox}[cpp]
+void fooThrowsInt(int a) throw(int) {
+printf_s("can throw ints\n");
+if (a == 0)
+throw 1;
+}
+\end{codebox}
+
+请特别注意 \texttt{throw(int)} 这部分。
+
+上述代码自 C++11 起已被弃用。唯一实用的异常声明是 \texttt{throw()}，它的含义是——这段代码不会抛出任何异常。自 C++11 起，建议改用 \texttt{noexcept}。
+
+例如，在 Clang 4.0 中你会得到如下错误：
+
+\begin{codebox}[cpp]
+error: ISO C++1z does not allow dynamic exception specifications
+[-Wdynamic-exception-spec] note: use 'noexcept(false)' instead
+\end{codebox}
+
+\begin{myInfoBox}
+该变更由 P0003R5\footnote{\url{http://wg21.link/p0003r5}} 提出。
+\end{myInfoBox}
+
+\subsection{其他被移除的特性}
+
+下面列出语言中其它一些被移除的小特性：
+
+\mySmallsection{\texttt{std::random\_shuffle}}
+
+该算法在 C++14 中就已标记为弃用。原因是它大多数情况下使用 \texttt{rand()} 函数，而该函数被认为效率低下甚至容易出错（因为它使用全局状态）。如果你需要同样的功能，请使用：
+
+\begin{codebox}[cpp]
+template< class RandomIt, class URBG >
+void shuffle( RandomIt first, RandomIt last, URBG&& g );
+\end{codebox}
+
+\texttt{std::shuffle} 接受随机数生成器作为第三个参数。详见 N4190\footnote{\url{https://wg21.link/n4190}}。
+
+\mySmallsection{移除旧的 functional 组件}
+
+像 \texttt{bind1st()}/\texttt{bind2nd()}/\texttt{mem\_fun()} 等函数是在 C++98 时代引入的，如今已不需要，因为你可以使用 lambda 表达式。此外，这些函数也没有更新以支持 C++11 中的完美转发、\texttt{decltype} 及其他现代技术。因此，在现代代码中最好不要使用它们。详见 N4190\footnote{\url{https://wg21.link/n4190}}。
+
+\mySmallsection{移除三连符}
+
+三连符（trigraphs）是在系统不支持 7 位 ASCII（如 ISO 646）时可使用的特殊字符序列。例如 \texttt{??=} 生成 \texttt{\#}，\texttt{??-} 产生 \texttt{\textasciitilde}（C++ 的基本源字符集全部都能放入 7 位 ASCII）。如今三连符极少被使用，将其从翻译阶段移除，可以让编译过程更直接。详见 N4086\footnote{\url{https://wg21.link/n4086}}。
+
+\section{修复}
+
+关于“什么是语言标准中的修复、什么不是”，我们或许会有不同看法。下面列出的三件事，看起来都像是在修补此前规则中缺失或未能正常工作的地方。
+
+\subsection{直接列表初始化的新 auto 规则}
+
+自 C++11 起就存在一个奇怪的问题：
+
+\begin{codebox}[cpp]
+auto x { 1 };
+\end{codebox}
+
+它会被推导为 \texttt{std::initializer\_list<int>}。这种行为并不直观，因为在多数情况下，你预期它的行为应该与 \texttt{int x \{ 1 \};} 相同。
+
+花括号初始化是现代 C++ 中推荐的模式，但这类例外削弱了该特性的表现力。
+
+借助新标准，我们可以修复这一点，使其推导为 \texttt{int}。
+
+要实现这一点，我们需要理解两种初始化方式——拷贝初始化与直接初始化：
+
+\begin{codebox}[cpp]
+auto x = foo();
+// copy-initialisation
+auto x{foo()};
+// direct-initialisation, initializes an
+// initializer_list (until C++17)
+int x = foo();
+// copy-initialisation
+int x{foo()};
+// direct-initialisation
+\end{codebox}
+
+对于直接初始化，C++17 引入了新的规则：
+\begin{itemize}
+\item 对于只含单个元素的花括号初始化列表，\texttt{auto} 推导将从该元素出发；
+\item 对于含有多个元素的花括号初始化列表，\texttt{auto} 推导将是非良构的。
+\end{itemize}
+
+例如：
+
+\begin{codebox}[cpp]
+auto x1 = { 1, 2 };
+// decltype(x1) is std::initializer_list<int>
+auto x2 = { 1, 2.0 }; // error: cannot deduce element type
+auto x3{ 1, 2 };
+// error: not a single element
+auto x4 = { 3 };
+// decltype(x4) is std::initializer_list<int>
+auto x5{ 3 };
+// decltype(x5) is int
+\end{codebox}
+
+\begin{myInfoBox}
+该变更由 N3922\footnote{\url{http://wg21.link/n3922}} 与 N3681\footnote{\url{http://wg21.link/n3681}} 提出。编译器很早就修复了这个问题：GCC 5.0（2015 年中）、Clang 3.8（2016 年初）和 MSVC 2015（2015 年中）都已提供该改进，远早于 C++17 正式定稿。
+\end{myInfoBox}
+
+\subsection{不带消息的 static\_assert}
+
+该特性为 \texttt{static\_assert} 新增了一个重载。它允许你只写 \texttt{static\_assert} 中的条件，而无需传入消息字符串。它与 \texttt{BOOST\_STATIC\_ASSERT} 等其他断言方式兼容。有 Boost 经验的程序员如今可以毫无障碍地切换到 C++17 的 \texttt{static\_assert}。
+
+\begin{codebox}[cpp]
+static_assert(std::is_arithmetic_v<T>, "T must be arithmetic");
+static_assert(std::is_arithmetic_v<T>); // no message needed since C++17
+\end{codebox}
+
+在大多数情况下，你所检查的条件本身已经足够清楚地表达了意图，无需再在消息字符串中赘述。
+
+\begin{myInfoBox}
+该变更由 N3928\footnote{\url{https://wg21.link/n3928}} 提出。
+\end{myInfoBox}
+
+\subsection{范围 for 循环中 begin 与 end 类型不同}
+
+自 C++11 起的范围 for 循环：
+
+\begin{codebox}[cpp]
+for (for-range-declaration : for-range-initializer)
+{
+statement;
+}
+\end{codebox}
+
+根据标准，这样的循环表达式等价于如下代码：
+
+\begin{codebox}[cpp]
+{
+auto && __range = for-range-initializer;
+for ( auto __begin = begin-expr, __end = end-expr;
+__begin != __end;
+++__begin ) {
+for-range-declaration = *__begin;
+statement
+}
+}
+\end{codebox}
+
+如你所见，\texttt{\_\_begin} 与 \texttt{\_\_end} 具有相同的类型。这用起来不错，但扩展性不足。例如，你可能希望一直迭代到某个与范围起点类型不同的哨兵（sentinel）。
+
+在 C++17 中，它被改为：
+
+\begin{codebox}[cpp]
+{
+auto && __range = for-range-initializer;
+auto __begin = begin-expr;
+auto __end = end-expr;
+for ( ; __begin != __end; ++__begin ) {
+for-range-declaration = *__begin;
+statement
+}
+}
+\end{codebox}
+
+\texttt{\_\_begin} 与 \texttt{\_\_end} 的类型可以不同；只需要比较运算符即可。这一改动对 for 循环的使用者而言没有明显影响，却为库的实现提供了更多可能。例如，正是这个小改动让 Range TS（以及 C++20 中的 Ranges）能够与范围 for 循环协同工作。
+
+\begin{myInfoBox}
+该变更由 P0184R0\footnote{\url{https://wg21.link/p0184r0}} 提出。
+\end{myInfoBox}
+
+\section{编译器支持}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+移除 register 关键字 & 7.0 & 3.8 & VS 2017 15.3 \\
+移除弃用的 operator++(bool) & 7.0 & 3.8 & VS 2017 15.3 \\
+移除弃用的异常规格说明 & 7.0 & 4.0 & VS 2017 15.5 \\
+移除 auto\_ptr、random\_shuffle 及旧版 \texttt{<functional>} & No\footnote{为兼容而保留。} & not yet & VS 2015 \\
+移除三连符（trigraphs） & 5.1 & 3.5 & VS 2010 \\
+直接列表初始化的新 auto 规则 & 5.0 & 3.8 & VS 2015 \\
+不带消息的 static\_assert & 6.0 & 2.5 & VS 2017 \\
+范围 for 循环中 begin 与 end 类型不同 & 6.0 & 3.6 & VS 2017 \\
+\bottomrule
+\end{tabularx}
+\end{table}

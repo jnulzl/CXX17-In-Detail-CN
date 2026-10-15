@@ -1,0 +1,133 @@
+C++11 是这门语言的一次重大更新。lambda 表达式、\texttt{constexpr}、可变参数模板、线程支持、基于范围的 \texttt{for} 循环、智能指针，以及众多其他强大的新元素，都让这门语言取得了巨大的进步。即便在 2018 年的今天，仍有大量团队在为项目现代化而苦苦努力，以求充分利用所有现代特性。随后出现了一次小版本更新——C++14，它改进了上一版标准中的部分内容，并新增了一些较小的元素。到了 C++17，大家的感受则颇为复杂。虽然 C++17 没有 C++11 那样庞大，但它比 C++14 更大。每个人都期待着模块（modules）、协程（coroutines）、概念（concepts）以及其他强大的特性，但要在规定时间内把这一切都准备好是不可能的。C++17 很弱吗？远非如此！而本书将向你证明这一点！
+
+本书为你带来关于 C++17 的独家内容，并汲取了 bfilipek.com 上众多文章的经验。各章都从头重写，并补充了最新的信息。所有内容都配备了大量新的示例和实用的技巧。此外，本书还深入剖析了当前的实现状态、编译器支持情况、性能问题以及其他相关知识，以助你提升当前项目的水平。
+
+\section{本书适合谁阅读}
+
+本书面向所有至少具备 C++11/14 基础经验的 C++ 开发者。本书的主要目标是让你掌握关于 C++17 的实用知识。读完本书后，你将能够跨越 C++11，在日常任务中运用最新的 C++ 技术。
+
+如果你并非 C++11/14 方面的专家，也请不必担心。本书会为你提供必要的背景知识，让你在恰当的语境中理解这些信息。
+
+\section{整体结构}
+
+C++17 为语言本身和标准库带来了大量改动。在本书中，所有新特性都被归类到几个片段中，以便读者更容易理解。
+
+因此，本书包含以下部分：
+
+\begin{itemize}
+  \item Part One——C++17 语言特性：
+  \begin{itemize}
+    \item 修复与弃用（Fixes and Deprecation）
+    \item 语言澄清（Language Clarification）
+    \item 通用语言特性（General Language Features）
+    \item 模板（Templates）
+    \item 属性（Attributes）
+  \end{itemize}
+  \item Part Two——C++17 标准库：
+  \begin{itemize}
+    \item \texttt{std::optional}
+    \item \texttt{std::variant}
+    \item \texttt{std::any}
+    \item \texttt{std::string\_view}
+    \item 字符串操作（String Operations）
+    \item 文件系统（Filesystem）
+    \item 并行 STL（Parallel STL）
+    \item 其他改动（Other Changes）
+  \end{itemize}
+  \item Part Three——更多示例与用例（More Examples and Use Cases）
+  \item 附录 A——编译器支持（Compiler Support）
+  \item 附录 B——资源与链接（Resources and Links）
+\end{itemize}
+
+第一部分——关于语言特性——篇幅较短，会带你快速浏览最重要的改动。你可以按任意顺序阅读。
+
+第二部分——描述了一组加入标准库的新库类型。这些辅助类型为 C++ 代码创造了一套潜在的新“词汇”：例如当你使用 \texttt{optional}、\texttt{any}、\texttt{variant} 或 \texttt{string\_view} 时。更重要的是，你获得了强大的新能力，尤其是以并行算法和标准文件系统形式呈现的能力。本部分的许多示例会用到 C++17 的众多其他特性。
+
+第三部分——把语言层面的所有改动汇聚在一起，并展示大量新特性协同使用的示例。你将看到关于重构、用新模板技术简化代码，或运用并行 STL 与文件系统的讨论。虽然第一、二部分也可以当作参考资料使用，但第三部分展示的是将众多特性融合在一起的、规模更大的 C++17 模式。
+
+本书的一大优势在于：每介绍一个新特性，你都会获得关于编译器支持和当前实现状态的信息。这样你就能检查最流行的编译器（MSVC、GCC 或 Clang）的某个特定版本是否已经实现了它。本书还就如何在现有代码库中应用新技术给出了实用的建议。
+
+\section{读者反馈}
+
+如果你发现错误、错别字、语法问题……或任何其他（尤其是某些逻辑问题！）需要纠正的地方，请告诉我们！
+
+请将你的反馈发送至 bartlomiej.filipek AT bfilipek.com。
+
+你也可以使用以下两个渠道：
+
+\begin{itemize}
+  \item Leanpub 图书反馈页面\footnote{\url{https://leanpub.com/cpp17indetail/feedback}}
+  \item GoodReads 图书页面\footnote{\url{https://www.goodreads.com/book/show/41447221-c-17-in-detail}}
+\end{itemize}
+
+\section{示例代码}
+
+你可以在本书网站上找到包含所有示例的 ZIP 包：cppindetail.com/data/cpp17indetail.zip\footnote{\url{https://www.cppindetail.com/data/cpp17indetail.zip}}。
+
+同一个 ZIP 包通常也会随电子书一同附上。
+
+书中大量示例都相对简短。你可以将代码行复制粘贴到你喜欢的编译器/IDE 中，然后运行这些代码片段。
+
+\subsection{代码许可}
+
+本书代码以知识共享许可证（Creative Commons License）发布。
+
+\subsection{编译}
+
+要使用 C++17，请确保为你的编译器提供恰当的标志：
+
+\begin{itemize}
+  \item 在 GCC（至少 7.1、8.0 或更新版本）中：使用 \texttt{-std=c++17} 或 \texttt{-std=c++2a}
+  \item 在 Clang（至少 4.0 或更新版本）中：使用 \texttt{-std=c++17} 或 \texttt{-std=c++2a}
+  \item 在 MSVC（Visual Studio 2017 或更新版本）中：在项目选项 \texttt{->} C/C++ \texttt{->} 语言 \texttt{->} C++ 语言标准 中使用 \texttt{/std:c++17} 或 \texttt{/std:c++latest}。
+\end{itemize}
+
+\subsection{排版}
+
+代码以等宽字体呈现，类似于下面的示例：
+
+\begin{codebox}[cpp]
+// Chapter Example/example_one.cpp
+#include <iostream>
+int main()
+{
+std::cout << "Hello World\n";
+}
+\end{codebox}
+
+较长的程序片段通常会被精简，只展示核心机制。在这种情况下，你可以在随书附带的独立 ZIP 包中找到它们的完整版本。
+
+代码片段的第一行会注明对应的文件——例如“\texttt{// Chapter Example/example\_one.cpp}”。
+
+通常，源代码会使用带命名空间的完整类型名，例如 \texttt{std::string}、\texttt{std::filesystem::*}。然而，为了让代码更紧凑、在书页上呈现得更美观，命名空间有时会被省略，以节省空间。此外，为了避免换行，较长的行有时会被手动拆成两行。在某些情况下，书中的代码可能会省略 \texttt{\#include} 语句。
+
+\textbf{语法高亮限制}
+
+本书当前版本在语法高亮方面可能存在一些限制。例如：
+
+\begin{itemize}
+  \item \texttt{if constexpr}——Pygments 问题链接：\#1432——C++ if constexpr not recognized (C++17)\footnote{\url{https://bitbucket.org/birkenfeld/pygments-main/issues/1432/c-if-constexpr-not-recognized-c-17}}
+  \item 类的第一个方法没有高亮——\#1084——First method of class not highlighted in C++\footnote{\url{https://bitbucket.org/birkenfeld/pygments-main/issues/1084/first-method-of-class-not-highlighted-in-c}}
+  \item 模板方法没有高亮 \#1434——C++ lexer doesn't recognize function if return type is templated\footnote{\url{https://bitbucket.org/birkenfeld/pygments-main/issues/1434/c-lexer-doesnt-recognize-function-if}}
+  \item 现代 C++ 属性有时无法被正确识别
+\end{itemize}
+
+关于 C++ 与 Pygments 的其他问题：issues C++\footnote{\url{https://bitbucket.org/birkenfeld/pygments-main/issues?q=c\%2B\%2B}}。
+
+\subsection{在线编译器}
+
+与其创建本地项目，你也可以利用一些在线编译器。它们提供基本的文本编辑器，通常只允许编译单个源文件（即你正在编辑的代码）。如果你只是想摆弄一个简单的代码示例，它们非常方便。
+
+例如，本书的许多代码示例都是用 Coliru 在线编译器创建的，随后根据书的内容做了相应调整。
+
+以下是一些有用的服务列表：
+
+\begin{itemize}
+  \item Coliru\footnote{\url{http://coliru.stacked-crooked.com/}}——使用 GCC 8.1.0（截至 2018 年 7 月），提供链接分享和基本文本编辑器，简单但非常有效。
+  \item Wandbox\footnote{\url{https://wandbox.org/}}——提供大量编译器——例如绝大多数 Clang 和 GCC 版本——并且你还可以使用 boost 库。同样提供链接分享。
+  \item Compiler Explorer\footnote{\url{https://gcc.godbolt.org/}}——显示你的代码的编译器输出！可选择多种编译器。
+  \item CppBench\footnote{\url{http://quick-bench.com/}}——运行简单的 C++ 性能测试（使用 google benchmark 库）。
+  \item C++ Insights\footnote{\url{https://cppinsights.io/}}——这是一个基于 Clang 的工具，可执行源码到源码的转换。它展示了编译器如何看待代码，例如展开 lambda、\texttt{auto}、结构化绑定或基于范围的 \texttt{for} 循环。
+\end{itemize}
+
+还有一个汇集在线编译器的优秀清单：List of Online C++ Compilers\footnote{\url{https://arnemertz.github.io/online-compilers/}}。

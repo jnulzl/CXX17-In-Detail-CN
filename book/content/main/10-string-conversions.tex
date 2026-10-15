@@ -1,0 +1,483 @@
+string\_view 并非我们在 C++17 中获得的唯一与字符串相关的特性。虽然视图能够减少临时拷贝的数量，但还有另一个非常实用的特性：转换工具。在新的 C++ 标准中，你拥有两组函数 \texttt{from\_chars} 和 \texttt{to\_chars}，它们是底层函数，并且有望带来显著的性能提升。
+
+本章你将学习：
+\begin{itemize}
+\item 为什么我们需要底层的字符串转换例程？
+\item 为什么标准库中现有的方案可能不够用？
+\item 如何使用 C++17 的转换例程
+\item 你能从新例程中期待怎样的性能提升
+\end{itemize}
+
+\section{基础字符串转换}
+
+随着 JSON 或 XML 这类数据格式的增多，对字符串进行高效处理与操作的需求也日益增长。当这些格式被用于通过网络通信、吞吐量成为关键时，极致的性能尤为重要。
+
+例如，你从一个网络数据包中拿到字符，将其反序列化（把字符串转换为数字），然后处理数据，最后再以相同的文件格式（把数字转换为字符串）序列化回去，并作为响应经网络发送出去。
+
+标准库在这些领域运气不佳，因为它通常被认为对这类高级字符串处理来说太慢了。开发者往往会选择自定义方案或第三方库。
+
+随着 C++17 的引入，情况可能发生改变——我们获得了两组函数：\texttt{from\_chars} 和 \texttt{to\_chars}，它们支持底层的字符串转换。
+
+该特性由 P0067\footnote{\url{https://wg21.link/P0067}} 提出。
+
+在原始提案中有一张很有用的表格，总结了当前所有的方案：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X X}
+\toprule
+工具 & 缺陷 \\
+\midrule
+\texttt{sprintf} & 格式字符串、locale、缓冲区溢出 \\
+\texttt{snprintf} & 格式字符串、locale \\
+\texttt{sscanf} & 格式字符串、locale \\
+\texttt{atol} & locale，不报告错误 \\
+\texttt{strtol} & locale，忽略空白字符与 \texttt{0x} 前缀 \\
+\texttt{strstream} & locale，忽略空白字符 \\
+\texttt{stringstream} & locale，忽略空白字符，内存分配 \\
+\texttt{num\_put} / \texttt{num\_get} facets & locale，虚函数 \\
+\texttt{to\_string} & locale，内存分配 \\
+\texttt{stoi} 等 & locale、内存分配、忽略空白字符与 \texttt{0x} 前缀、异常 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+正如你在上面看到的，有时转换函数做了过多的工作，这使得整个处理过程变慢。此外，往往并不需要那些额外的特性。
+
+首先，它们全都使用“locale”。所以即便你处理的是通用字符串，也得为本地化支持付出一点代价。例如，当你解析来自 XML 或 JSON 的数字时，根本不需要套用当前的系统语言，因为这些格式是互通的。
+
+下一个问题是错误报告。有些函数可能抛出异常，有些只返回一个基础值。异常不仅可能代价高昂（因为抛出可能涉及额外的内存分配），而且解析错误往往并不是异常情况——通常应用程序已经为此类情况做好了准备。返回一个简单的值——例如 \texttt{atoi} 返回 0、\texttt{atof} 返回 0.0——同样存在局限，因为那样你无从得知解析是否成功。
+
+另一个问题，尤其是较老的 C 风格 API，是你必须提供某种形式的“格式字符串”。解析这样的字符串可能带来额外的开销。
+
+另一点是“空白字符”的支持。像 \texttt{strtol} 或 \texttt{stringstream} 这样的函数可能会跳过字符串开头的空白字符。这也许方便，但有时你并不想为这个额外特性付出代价。
+
+还有一个关键因素：安全性。简单的函数不提供任何缓冲区溢出的解决方案，而且它们只处理以空字符结尾的字符串。在这种情况下，你无法使用 \texttt{string\_view} 来传递数据。
+
+新的 C++17 API 解决了上述所有问题。它们没有提供众多功能，而是专注于提供非常底层的支持。这样你就能获得最高的速度，并按需裁剪它们。
+
+新的函数保证具备以下特性：
+\begin{itemize}
+\item 不抛异常——出现某些错误时不会抛出任何异常（不像 \texttt{stoi}）
+\item 不分配内存——整个处理在原地完成，没有任何额外的内存分配
+\item 不支持 locale——字符串按通用方式解析，如同使用默认（“C”）locale
+\item 内存安全——输入和输出范围都被明确指定，从而允许进行缓冲区溢出检查
+\item 无需传入数字的字符串格式
+\item 错误报告——提供关于转换结果的附加信息
+\end{itemize}
+
+总而言之，在 C++17 中你拥有两组函数：
+\begin{itemize}
+\item \texttt{from\_chars}——用于将字符串转换为数字，包括整数和浮点数。
+\item \texttt{to\_chars}——用于将数字转换为字符串。
+\end{itemize}
+
+让我们更详细地看看这些函数。
+
+\section{从字符到数字：from\_chars}
+
+\texttt{from\_chars} 是一组重载函数：分别用于整数类型和浮点类型。
+
+对于整数类型，我们有如下函数：
+
+\begin{codebox}[cpp]
+std::from_chars_result from_chars(const char* first,
+                                  const char* last,
+                                  TYPE &value,
+                                  int base = 10);
+\end{codebox}
+
+其中 \texttt{TYPE} 展开为所有可用的有符号和无符号整数类型以及 \texttt{char}。
+
+\texttt{base} 可以是 2 到 36 之间的数字。
+
+然后是浮点版本：
+
+\begin{codebox}[cpp]
+std::from_chars_result from_chars(const char* first,
+                                  const char* last,
+                                  FLOAT_TYPE& value,
+                                  std::chars_format fmt = std::chars_format::general);
+\end{codebox}
+
+\texttt{FLOAT\_TYPE} 展开为 \texttt{float}、\texttt{double} 或 \texttt{long double}。
+
+\texttt{chars\_format} 是一个具有以下取值的枚举：
+
+\begin{codebox}[cpp]
+enum class chars_format {
+    scientific = /*unspecified*/,
+    fixed = /*unspecified*/,
+    hex = /*unspecified*/,
+    general = fixed | scientific
+};
+\end{codebox}
+
+它是一种位掩码类型，因此枚举值的具体取值由实现定义。默认情况下，格式被设为 \texttt{general}，所以输入字符串既可以使用“普通”的浮点格式，也可以使用科学计数法形式。
+
+上述所有函数（整数和浮点）的返回值都是 \texttt{from\_chars\_result}：
+
+\begin{codebox}[cpp]
+struct from_chars_result {
+    const char* ptr;
+    std::errc ec;
+};
+\end{codebox}
+
+\texttt{from\_chars\_result} 保存了关于转换过程的宝贵信息。
+
+总结如下：
+\begin{itemize}
+\item 成功时，\texttt{from\_chars\_result::ptr} 指向第一个不匹配模式的字符；或者当所有字符都匹配时，其值等于 \texttt{last}，并且 \texttt{from\_chars\_result::ec} 为值初始化状态。
+\item 转换无效时，\texttt{from\_chars\_result::ptr} 等于 \texttt{first}，且 \texttt{from\_chars\_result::ec} 等于 \texttt{std::errc::invalid\_argument}。\texttt{value} 保持不变。
+\item 超出范围时——数字太大，无法放入该值类型。\texttt{from\_chars\_result::ec} 等于 \texttt{std::errc::result\_out\_of\_range}，且 \texttt{from\_chars\_result::ptr} 指向第一个不匹配模式的字符。\texttt{value} 保持不变。
+\end{itemize}
+
+\subsection{示例}
+
+总而言之，下面是两个使用 \texttt{from\_chars} 将字符串转换为数字的示例，分别转换为 \texttt{int} 和 \texttt{float}。
+
+整数类型
+
+\begin{codebox}[cpp]
+// 第 10 章 字符串转换 / from_chars_basic.cpp
+#include <charconv> // from_chars, to_chars
+#include <string>
+int main()
+{
+    const std::string str { "12345678901234" };
+    int value = 0;
+    const auto res = std::from_chars(str.data(),
+                                     str.data() + str.size(),
+                                     value);
+    if (res.ec == std::errc())
+    {
+        std::cout << "value: " << value
+                  << ", distance: " << res.ptr - str.data() << '\n';
+    }
+    else if (res.ec == std::errc::invalid_argument)
+    {
+        std::cout << "invalid argument!\n";
+    }
+    else if (res.ec == std::errc::result_out_of_range)
+    {
+        std::cout << "out of range! res.ptr distance: "
+                  << res.ptr - str.data() << '\n';
+    }
+}
+\end{codebox}
+
+这个示例很直接：它把一个字符串 \texttt{str} 传入 \texttt{from\_chars}，并在可能的情况下附带额外信息显示结果。
+
+下面是针对不同 \texttt{str} 取值的运行输出：
+
+\begin{codebox}[cpp]
+str value
+output
+12345
+value: 12345, distance 5
+12345678901234
+out of range! res.ptr distance: 14
+hfhfyt
+invalid argument!
+\end{codebox}
+
+对于 \texttt{12345678901234}，转换例程能够解析出数字，但它太大，无法放入 \texttt{int}。
+
+浮点数
+
+要进行浮点测试，我们可以把前面示例的开头几行替换为：
+
+\begin{codebox}[cpp]
+// 第 10 章 字符串转换 / from_chars_basic_float.cpp
+const std::string str { "16.78" };
+double value = 0;
+const auto format = std::chars_format::general;
+const auto res = std::from_chars(str.data(),
+                                 str.data() + str.size(),
+                                 value,
+                                 format);
+\end{codebox}
+
+下面是我们得到的示例输出：
+
+\begin{codebox}[cpp]
+str value
+format value
+output
+1.01
+fixed
+value: 1.01, distance 4
+-67.90000
+fixed
+value: -67.9, distance: 9
+1e+10
+fixed
+value: 1, distance: 1 - scientific notation not supported
+1e+10
+fixed
+value: 1, distance: 1 - scientific notation not supported
+20.9
+scientific
+invalid argument!, res.p distance: 0
+20.9e+0
+scientific
+value: 20.9, distance: 7
+-20.9e+1
+scientific
+value: -209, distance: 8
+F.F
+hex
+value: 15.9375, distance: 3
+-10.1
+hex
+value: -16.0625, distance: 5
+\end{codebox}
+
+\texttt{general} 格式是 \texttt{fixed} 与 \texttt{scientific} 的组合，因此它能处理常规浮点字符串，并额外支持 \texttt{e+num} 这种语法。
+
+你已经对从字符串到数字的转换有了基本了解，那么接下来我们看看如何反过来做。
+
+\subsection{解析命令行}
+
+在 \texttt{std::variant} 一章中有一个解析命令行参数的示例。该示例使用 \texttt{from\_chars} 来匹配最佳类型：\texttt{int}、\texttt{float} 或 \texttt{std::string}，然后将其存入一个 \texttt{std::variant} 中。
+
+你可以在这里找到该示例：Parsing a Command Line（variant 章）。
+
+\section{从数字到字符：to\_chars}
+
+\texttt{to\_chars} 是一组针对整数和浮点类型重载的函数。
+
+对于整数类型，有一个声明：
+
+\begin{codebox}[cpp]
+std::to_chars_result to_chars(char* first, char* last,
+                              TYPE value, int base = 10);
+\end{codebox}
+
+其中 \texttt{TYPE} 展开为所有可用的有符号和无符号整数类型以及 \texttt{char}。
+
+由于 \texttt{base} 的取值范围可以是 2 到 36，大于 9 的输出数字用小写字母表示：\texttt{a...z}。
+
+对于浮点数则有更多选项。
+
+首先是一个基础函数：
+
+\begin{codebox}[cpp]
+std::to_chars_result to_chars(char* first, char* last, FLOAT_TYPE value);
+\end{codebox}
+
+\texttt{FLOAT\_TYPE} 展开为 \texttt{float}、\texttt{double} 或 \texttt{long double}。
+
+该转换的工作方式与 \texttt{printf} 相同，并使用默认（“C”）locale。它使用 \texttt{\%f} 或 \texttt{\%e} 格式说明符，优先选择表示最短的那一种。
+
+下一个函数增加了 \texttt{std::chars\_format fmt}，让你能够指定输出格式：
+
+\begin{codebox}[cpp]
+std::to_chars_result to_chars(char* first, char* last,
+                              FLOAT_TYPE value,
+                              std::chars_format fmt);
+\end{codebox}
+
+然后是“完整”版本，它还允许指定精度：
+
+\begin{codebox}[cpp]
+std::to_chars_result to_chars(char* first, char* last,
+                              FLOAT_TYPE value,
+                              std::chars_format fmt,
+                              int precision);
+\end{codebox}
+
+当转换成功时，区间 \texttt{[first, last)} 被填入转换后的字符串。
+
+所有函数（整数和浮点支持）的返回值都是 \texttt{to\_chars\_result}，其定义如下：
+
+\begin{codebox}[cpp]
+struct to_chars_result {
+    char* ptr;
+    std::errc ec;
+};
+\end{codebox}
+
+该类型保存了关于转换过程的信息：
+\begin{itemize}
+\item 成功时——\texttt{ec} 等于值初始化后的 \texttt{std::errc}，\texttt{ptr} 为已写入字符的末尾后一位置指针。注意，该字符串不是以 NULL 结尾的。
+\item 出错时——\texttt{ptr} 等于 \texttt{first}，\texttt{ec} 等于 \texttt{std::errc::invalid\_argument}。\texttt{value} 保持不变。
+\item 超出范围时——\texttt{ec} 等于 \texttt{std::errc::value\_too\_large}，区间 \texttt{[first, last)} 处于未指定状态。
+\end{itemize}
+
+\subsection{一个示例}
+
+总而言之，下面是一个 \texttt{to\_chars} 的基础演示。
+
+在写作本书时，浮点重载尚未被支持，因此该示例仅使用了整数。
+
+\begin{codebox}[cpp]
+// 第 10 章 字符串转换 / to_chars_basic.cpp
+#include <iostream>
+#include <charconv> // from_chars, to_chars
+#include <string>
+int main()
+{
+    std::string str { "xxxxxxxx" };
+    const int value = 1986;
+    const auto res = std::to_chars(str.data(),
+                                   str.data() + str.size(),
+                                   value);
+    if (res.ec == std::errc())
+    {
+        std::cout << str << ", filled: "
+                  << res.ptr - str.data() << " characters\n";
+    }
+    else
+    {
+        std::cout << "value too large!\n";
+    }
+}
+\end{codebox}
+
+下面是一组数字对应的示例输出：
+
+\begin{codebox}[cpp]
+value
+output
+1986
+1986xxxx, filled: 4 characters
+-1986
+-1986xxx, filled: 5 characters
+19861986
+19861986, filled: 8 characters
+-19861986
+value too large! (the buffer is only 8 characters)
+\end{codebox}
+
+\section{基准测试}
+
+到目前为止，本章已经提到了新例程巨大的性能潜力。那么最好来看一些真实的数字！
+
+本节介绍一个基准测试，用于测量 \texttt{from\_chars} 和 \texttt{to\_chars} 相对于其他转换方法的性能。
+
+基准测试的工作原理如下：
+\begin{itemize}
+\item 生成大小为 \texttt{VECSIZE} 的随机整数向量。
+\item 每一对转换方法都会把输入整数向量转换为字符串向量，然后再转回另一个整数向量。这个往返过程会被校验，以确保输出向量与输入向量相同。
+\item 转换执行 \texttt{ITER} 次。
+\item 不检查转换函数的错误。
+\item 测试的代码包括：
+  \begin{itemize}
+  \item \texttt{from\_char}/\texttt{to\_chars}
+  \item \texttt{to\_string}/\texttt{stoi}
+  \item \texttt{sprintf}/\texttt{atoi}
+  \item \texttt{ostringstream}/\texttt{istringstream}
+  \end{itemize}
+\end{itemize}
+
+你可以在这里找到完整的基准测试代码：
+“Chapter String Conversions/conversion\_benchmark.cpp”
+
+下面是 \texttt{from\_chars}/\texttt{to\_chars} 的代码：
+
+\begin{codebox}[cpp]
+const auto numIntVec = GenRandVecOfNumbers(vecSize);
+std::vector<std::string> numStrVec(numIntVec.size());
+std::vector<int> numBackIntVec(numIntVec.size());
+std::string strTmp(15, ' ');
+RunAndMeasure("to_chars", [&]() {
+    for (size_t iter = 0; iter < ITERS; ++iter)
+    {
+        for (size_t i = 0; i < numIntVec.size(); ++i)
+        {
+            const auto res = std::to_chars(strTmp.data(),
+                                           strTmp.data() + strTmp.size(),
+                                           numIntVec[i]);
+            numStrVec[i] = std::string_view(strTmp.data(),
+                                           res.ptr - strTmp.data());
+        }
+    }
+    return numStrVec.size();
+});
+RunAndMeasure("from_chars", [&]() {
+    for (size_t iter = 0; iter < ITERS; ++iter)
+    {
+        for (size_t i = 0; i < numStrVec.size(); ++i)
+        {
+            std::from_chars(numStrVec[i].data(),
+                            numStrVec[i].data() + numStrVec[i].size(),
+                            numBackIntVec[i]);
+        }
+    }
+    return numBackIntVec.size();
+});
+CheckVectors(numIntVec, numBackIntVec);
+\end{codebox}
+
+\texttt{CheckVectors}——检查两个输入整数向量是否包含相同的值，并在出错时打印不匹配项。
+
+该基准测试将 \texttt{vector<int>} 转换为 \texttt{vector<string>}，我们测量的是整个转换过程，其中也包括字符串对象的创建。
+
+下面是在包含 1000 个元素的向量上运行 1000 次迭代的结果：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+方法 & GCC 8.2 & Clang 7.0（Win） & MSVC（VS 2017 15.8，x64） \\
+\midrule
+\texttt{to\_chars} & 21.94 & 18.15 & 24.81 \\
+\texttt{from\_chars} & 15.96 & 12.74 & 13.43 \\
+\texttt{to\_string} & 61.84 & 16.62 & 20.91 \\
+\texttt{stoi} & 70.81 & 45.75 & 42.40 \\
+\texttt{sprintf} & 56.85 & 124.72 & 131.03 \\
+\texttt{atoi} & 35.90 & 34.81 & 32.50 \\
+\texttt{ostringstream} & 264.29 & 681.29 & 575.95 \\
+\texttt{stringstream} & 306.17 & 789.04 & 664.90 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+时间单位为毫秒。
+
+机器：Windows 10 x64、i7 8700 基础频率 3.2 GHz、6 核 / 12 线程（尽管该基准测试只使用单线程进行处理）。
+\begin{itemize}
+\item GCC 8.2——使用 \texttt{-std=c++17 -O2 -Wall -pedantic} 编译，MinGW Distro\footnote{\url{https://nuwen.net/mingw.html}}
+\item Clang 7.0——使用 \texttt{-std=c++17 -O2 -Wall -pedantic} 编译，Clang For Windows\footnote{\url{http://releases.llvm.org/download.html}}
+\item Visual Studio 2017 15.8——Release 模式，x64
+\end{itemize}
+
+一些说明：
+\begin{itemize}
+\item 在 GCC 上，\texttt{to\_chars} 比 \texttt{to\_string} 快近 3 倍，比 \texttt{sprintf} 快 2.6 倍，比 \texttt{ostringstream} 快 12 倍！
+\item 在 Clang 上，\texttt{to\_chars} 实际上比 \texttt{to\_string} 略慢，但比 \texttt{sprintf} 快约 7 倍，而且出人意料地比 \texttt{ostringstream} 快近 40 倍！
+\item MSVC 与 \texttt{to\_string} 相比性能也较慢，但随后 \texttt{to\_chars} 比 \texttt{sprintf} 快约 5 倍，比 \texttt{ostringstream} 快约 23 倍。
+\end{itemize}
+
+再看 \texttt{from\_chars}：
+\begin{itemize}
+\item 在 GCC 上，它比 \texttt{stoi} 快约 4.5 倍，比 \texttt{atoi} 快 2.2 倍，比 \texttt{istringstream} 快近 20 倍。
+\item 在 Clang 上，它比 \texttt{stoi} 快约 3.5 倍，比 \texttt{atoi} 快 2.7 倍，比 \texttt{istringstream} 快 60 倍！
+\item MSVC 比 \texttt{stoi} 快约 3 倍，比 \texttt{atoi} 快约 2.5 倍，比 \texttt{istringstream} 快近 50 倍！
+\end{itemize}
+
+如前所述，该基准测试也包含了字符串对象创建的开销。这就是为什么 \texttt{to\_string}（为字符串做了优化）可能比 \texttt{to\_chars} 表现略好。如果你已经有一个字符缓冲区，并且不需要创建字符串对象，那么 \texttt{to\_chars} 应该更快。
+
+下面是根据上表绘制的两张图表。
+
+字符串转换为数字，时间单位为毫秒
+
+\myGraphic{0.9}{images/fig\_p184\_1.png}{}
+
+数字转换为字符串，时间单位为毫秒
+
+\myGraphic{0.9}{images/fig\_p184\_2.png}{}
+
+与往常一样，建议你在做出最终判断之前，在自己的环境中运行这些基准测试。在你的环境中你可能会得到不同的结果，因为那里也许可用的是不同的编译器或 STL 库实现。
+
+\section{小结}
+
+本章展示了如何使用两组函数：\texttt{from\_chars}——用于将字符串转换为数字，以及 \texttt{to\_chars}——用于将数字转换为其文本表示。
+
+这些函数看起来可能非常原始，甚至带有 C 风格。为了在获得如此底层的支持、性能、安全性和灵活性的同时做到这一点，这是一个你不得不付出的“代价”。其优点在于，你可以提供一个简单的包装器，只暴露你所需要的那部分功能。
+
+\begin{myInfoBox}
+该改动由 P0067\footnote{\url{https://wg21.link/P0067}} 提出。
+\end{myInfoBox}

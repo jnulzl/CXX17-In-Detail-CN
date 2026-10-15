@@ -1,0 +1,634 @@
+C++17 新增了几个包装类型，让我们可以写出更具表达力的代码。在本章中，你将看到 \texttt{std::optional}，它用于建模可空（nullable）类型。
+
+在本章中，你将学到：
+\begin{itemize}
+\item 为何需要可空类型
+\item \texttt{std::optional} 的工作原理与功能
+\item 在 \texttt{std::optional} 上的操作
+\item 使用该类型带来的性能开销
+\item 使用示例
+\end{itemize}
+
+\section{引言}
+通过给其它类型加上一个布尔标志，可以实现所谓的“可空类型”。这类包装器以一种富有表达力的方式，表示一个可能为空的对象。
+
+虽然你可以用“唯一值”（-1、无穷大、\texttt{nullptr}）来实现“可空”，但这不如单独的包装类型清晰。或者，你甚至可以使用 \texttt{std::unique\_ptr<Type>}，把空指针当作“未初始化”。这能工作，但要付出为该对象分配内存的代价，因此不是推荐的做法。
+
+来自函数式编程世界的可选类型带来了类型安全与表达力。大多数其它语言都有类似的东西：例如 Rust 中的 \texttt{std::option}、Java 中的 \texttt{Optional<T>}、Haskell 中的 \texttt{Data.Maybe}。
+
+\texttt{std::optional} 在 C++17 中加入，并借鉴了多年来可用的 \texttt{boost::optional} 的诸多经验。有了 C++17，你只需 \texttt{\#include <optional>} 即可使用该类型。此外，\texttt{std::optional} 也曾出现在 Library Fundamentals TS 中，因此你的 C++14 编译器也可能在 \texttt{<experimental/optional>} 头文件中支持它。
+
+\texttt{std::optional} 仍然是一种值类型（因此可以通过深拷贝来复制）。而且，\texttt{std::optional} 不需要在自由存储区分配任何内存。\texttt{std::optional} 与 \texttt{std::any}、\texttt{std::variant} 和 \texttt{std::string\_view} 一起，是 C++ 词汇类型（vocabulary types）的一部分。
+
+\subsection{何时使用}
+通常在以下场景中使用 optional 包装器：
+\begin{itemize}
+\item 如果你想表示一个可空类型。
+\begin{itemize}
+\item 而不是使用唯一值（如 -1、\texttt{nullptr}、\texttt{NO\_VALUE} 之类）
+\item 例如，用户的中间名是可选的。你可能会认为空字符串在这里可行，但知道用户是否输入了某些内容可能很重要。\texttt{std::optional<std::string>} 能提供更多信息。
+\end{itemize}
+\item 返回某个计算（处理）的结果，该计算未能产生值，但这并非错误。
+\end{itemize}
+
+例如，在字典中查找元素：如果某个键下没有元素，这并非错误，但我们需要处理这种情况。
+
+执行资源的延迟加载。例如，某个资源类型没有默认构造函数，且构造开销很大。因此你可以把它定义为 \texttt{std::optional<Resource>}（并可以在系统中传递它），然后在需要时再加载。
+
+向函数传递可选参数。\texttt{boost.optional} 中有一段描述，总结了我们应在何时使用该类型：
+
+来自 \texttt{boost::optional} 文档：何时使用 Optional\footnote{\url{https://www.boost.org/doc/libs/1_67_0/libs/optional/doc/html/boost_optional/tutorial/when_to_use_optional.html}}：
+
+\begin{myQuote}
+建议在以下情形中使用 \texttt{optional<T>}：存在唯一且（对所有相关方）明确的原因使得类型 T 没有值，并且“没有值”与拥有 T 的任何常规值一样自然。
+\end{myQuote}
+
+虽然有时是否使用 optional 的界限比较模糊，但它最适用于“值为空且这是程序的正常状态”的情形。
+
+\subsection{基本示例}
+下面是一个简单的例子，展示你可以用 optional 做什么：
+
+\begin{codebox}[cpp]
+// UI 类……
+std::optional<std::string> UI::FindUserNick()
+{
+if (IsNickAvailable())
+return mStrNickName; // 返回一个字符串
+return std::nullopt; // 等同于 return { };
+}
+// 使用：
+std::optional<std::string> UserNick = UI->FindUserNick();
+if (UserNick)
+Show(*UserNick);
+\end{codebox}
+
+在上述代码中，我们定义了一个返回包含字符串的 optional 的函数。如果用户昵称可用，则返回一个字符串；否则返回 \texttt{std::nullopt}。随后我们可以将其赋给一个 optional，并检查（它可转换为 \texttt{bool}）其中是否包含值。optional 定义了 \texttt{operator*}，因此我们可以方便地访问所包含的值。
+
+在接下来的各节中，你将看到如何创建 \texttt{std::optional}、对它进行操作、将它传递，甚至了解你可能需要考虑的相应性能开销。
+
+\section{std::optional 的创建}
+有几种创建 \texttt{std::optional} 的方式：
+\begin{itemize}
+\item 初始化为空
+\item 直接用值初始化
+\item 借助推导指引（deduction guides）用值初始化
+\item 使用 \texttt{make\_optional}
+\item 使用 \texttt{std::in\_place}
+\item 从其它 optional 拷贝
+\end{itemize}
+
+代码如下：
+
+\begin{codebox}[cpp]
+// 空：
+std::optional<int> oEmpty;
+std::optional<float> oFloat = std::nullopt;
+// 直接：
+std::optional<int> oInt(10);
+std::optional oIntDeduced(10); // 推导指引
+// make_optional
+auto oDouble = std::make_optional(3.0);
+auto oComplex = std::make_optional<std::complex<double>>(3.0, 4.0);
+// in_place
+std::optional<std::complex<double>> o7{std::in_place, 3.0, 4.0};
+// 会以 {1, 2, 3} 直接初始化来调用 vector
+std::optional<std::vector<int>> oVec(std::in_place, {1, 2, 3});
+// 从其它 optional 拷贝：
+auto oIntCopy = oInt;
+\end{codebox}
+
+正如你在上面的代码示例中所见，optional 的创建非常灵活。对基本类型来说很直接，这种简洁性甚至延伸到了复杂类型。如果你想完全掌控创建过程与效率，了解 \texttt{in\_place} 辅助类型也很有帮助。
+
+\subsection{in\_place 构造}
+\texttt{std::optional} 是一种包装类型，因此你应当能够几乎以与被包装对象相同的方式来创建 optional 对象。而且在大多数情况下确实可以：
+
+\begin{codebox}[cpp]
+std::optional<std::string> ostr{"Hello World"};
+std::optional<int> oi{10};
+\end{codebox}
+
+你也可以不显式写出构造函数来写上述代码，例如：
+
+\begin{codebox}[cpp]
+std::optional<std::string> ostr{std::string{"Hello World"}};
+std::optional<int> oi{int{10}};
+\end{codebox}
+
+因为 \texttt{std::optional} 有一个接受 \texttt{U\&\&}（可转换为 optional 所存储类型的类型的右值引用）的构造函数。在我们的例子中，它被识别为 \texttt{const char*}，而字符串可以从中初始化。
+
+那么，在 \texttt{std::optional} 中使用 \texttt{std::in\_place\_t} 有什么优势？至少有两个重要原因：
+\begin{itemize}
+\item 默认构造函数
+\item 对带多个参数的构造函数进行高效构造
+\end{itemize}
+
+\mySmallsection{默认构造}
+如果你有一个带默认构造函数的类，例如：
+
+\begin{codebox}[cpp]
+class UserName
+{
+public:
+UserName() : mName("Default")
+{
+}
+// ……
+};
+\end{codebox}
+
+你会如何创建一个包含 \texttt{UserName\{\}} 的 optional？你可以这样写：
+
+\begin{codebox}[cpp]
+std::optional<UserName> u0; // 空 optional
+std::optional<UserName> u1{}; // 同样为空
+// 用默认构造的对象构造 optional：
+std::optional<UserName> u2{UserName()};
+\end{codebox}
+
+这能工作，但会创建一个额外的临时对象。如果我们追踪每一次不同的构造函数和析构函数调用，会得到如下输出：
+
+\begin{codebox}[cpp]
+UserName::UserName('Default')
+UserName::UserName(move 'Default')
+// 移动临时对象
+UserName::~UserName('')
+// 删除临时对象
+UserName::~UserName('Default')
+\end{codebox}
+
+这段代码创建了一个临时对象，然后将其移动（move）到 optional 内部存储的对象中。
+
+这里我们可以使用一种更高效的构造方式——具体来说，利用 \texttt{std::in\_place\_t}：
+
+\begin{codebox}[cpp]
+std::optional<UserName> opt{std::in_place};
+\end{codebox}
+
+加上构造函数和析构函数的追踪，你会得到如下输出：
+
+\begin{codebox}[cpp]
+UserName::UserName('Default')
+UserName::~UserName('Default')
+\end{codebox}
+
+optional 中存储的对象是“原地”创建的，就像你调用 \texttt{UserName\{\}} 一样。不需要额外的拷贝或移动。
+
+参见本章示例 \texttt{Optional/optional\_in\_place\_default.cpp}。在该文件中，你还能看到构造函数与析构函数的追踪。
+
+\mySmallsection{不可拷贝/不可移动的类型}
+正如你在上一节的例子中看到的，如果你用一个临时对象来初始化 \texttt{std::optional} 内部的包含值，编译器就不得不使用移动或拷贝构造函数。但如果你的类型不允许这样做呢？例如 \texttt{std::mutex} 既不可移动也不可拷贝。在这种情况下，\texttt{std::in\_place} 是处理这类类型的唯一方式。
+
+\mySmallsection{带多个参数的构造函数}
+另一个使用场景是你的类型在构造函数中有多个参数。默认情况下，optional 只能处理单个参数（右值引用），并高效地将其传递给被包装类型。但如果你想初始化 \texttt{Point(x, y)} 呢？你总是可以创建一个临时副本，然后在构造时传入：
+
+\begin{codebox}[cpp]
+struct Point
+{
+Point(int a, int b) : x(a), y(b) { }
+int x;
+int y;
+};
+std::optional<Point> opt{Point{0, 0}};
+\end{codebox}
+
+或者使用 \texttt{in\_place} 以及处理变长参数列表的构造函数版本：
+
+\begin{codebox}[cpp]
+template< class... Args >
+constexpr explicit optional( std::in_place_t, Args&&... args );
+// 或 initializer_list 版本：
+template< class U, class... Args >
+constexpr explicit optional( std::in_place_t,
+std::initializer_list<U> ilist,
+Args&&... args );
+\end{codebox}
+
+\begin{codebox}[cpp]
+std::optional<Point> opt{std::in_place_t, 0, 0};
+\end{codebox}
+
+第二种写法相当冗长，并避免了创建临时对象。临时对象——尤其是对容器或较大对象而言——不如原地构造高效。
+
+可以试着运行位于本章 \texttt{Optional/optional\_point.cpp} 的示例。
+
+\mySmallsection{std::make\_optional()}
+如果你不喜欢 \texttt{std::in\_place}，可以看看 \texttt{make\_optional} 工厂函数。代码如下：
+
+\begin{codebox}[cpp]
+auto opt = std::make_optional<UserName>();
+auto opt = std::make_optional<Point>(0, 0);
+\end{codebox}
+
+其效率等同于：
+
+\begin{codebox}[cpp]
+std::optional<UserName> opt{std::in_place};
+std::optional<Point> opt{std::in_place_t, 0, 0};
+\end{codebox}
+
+\texttt{make\_optional} 实现的原地构造等价于：
+
+\begin{codebox}[cpp]
+return std::optional<T>(std::in_place, std::forward<Args>(args)...);
+\end{codebox}
+
+而且，得益于 C++17 的强制拷贝消除（mandatory copy elision），其中不涉及任何临时对象。
+
+\section{返回 std::optional}
+如果你从一个函数返回 optional，那么只返回 \texttt{std::nullopt} 或计算出的值会非常方便。
+
+\begin{codebox}[cpp]
+std::optional<std::string> TryParse(Input input)
+{
+if (input.valid())
+return input.asString();
+return std::nullopt;
+}
+\end{codebox}
+
+在上面的例子中，你可以看到函数返回由 \texttt{input.asString()} 计算得到的 \texttt{std::string}，并被包装进 optional。如果值不可用，则可以返回 \texttt{std::nullopt}。
+
+当然，你也可以在函数开头声明一个空的 optional，并在得到计算值后重新赋值。因此我们可以把上面的例子改写为：
+
+\begin{codebox}[cpp]
+std::optional<std::string> TryParse(Input input)
+{
+std::optional<std::string> oOut; // 空
+if (input.valid())
+oOut = input.asString();
+return oOut;
+}
+\end{codebox}
+
+然而，由于 C++17 的强制拷贝消除，如果可能，使用第一个版本（不具名的 optional）会更优。这样能避免创建临时对象。
+
+\subsection{返回时小心使用花括号}
+你可能会对下面这段代码感到意外\footnote{感谢 JFT 指出这个问题。}：
+
+\begin{codebox}[cpp]
+std::optional<std::string> CreateString()
+{
+std::string str {"Hello Super Awesome Long String"};
+return {str}; // 这一行会导致一次拷贝
+//
+return str;
+// 这一行会移动
+}
+\end{codebox}
+
+根据标准，如果你把返回值用花括号 \texttt{\{\}} 包起来，就会阻止移动操作的发生。返回的对象将仅被拷贝。
+
+这与不可拷贝类型的情况类似：
+
+\begin{codebox}[cpp]
+std::unique_ptr<int> foo()
+{
+std::unique_ptr<int> p;
+return {p};
+// 使用了 unique_ptr 的拷贝，因此会编译失败……
+//
+return p; // 这一行会移动，因此对 unique_ptr 来说没问题
+}
+\end{codebox}
+
+标准在 [class.copy.elision]/3\footnote{\url{http://www.eel.is/c++draft/class.copy.elision\#3}} 中指出：
+
+\begin{myQuote}
+在以下拷贝初始化上下文中，可以使用移动操作来代替拷贝操作：—— 如果 return 语句（[stmt.return]）中的表达式是一个（可能被括号包裹的）标识表达式（id-expression），它命名了在最内层 enclosing 函数或 lambda 表达式的函数体或形参声明子句中声明的、具有自动存储期的对象；或者 —— 如果 throw 表达式的操作数是某个非易失自动对象（函数或 catch 子句形参除外）的名字，且其作用域不超过最内层 enclosing try 块（如果有的话）的末尾。
+\end{myQuote}
+
+可以试着运行位于本章 \texttt{Optional/optional\_return.cpp} 的示例。该代码展示了几个使用 \texttt{std::unique\_ptr}、\texttt{std::vector}、\texttt{std::string} 以及自定义类型的例子。
+
+\section{访问存储的值}
+对于 optional 而言（除创建之外）最重要的操作，大概就是获取所包含值的方式了。有几种选择：
+\begin{itemize}
+\item \texttt{operator*} 与 \texttt{operator->} —— 如果没有值，行为未定义！
+\item \texttt{value()} —— 返回值，否则抛出 \texttt{std::bad\_optional\_access}
+\item \texttt{value\_or(defaultVal)} —— 如果有值则返回值，否则返回 \texttt{defaultVal}
+\end{itemize}
+
+要检查值是否存在，可以使用 \texttt{has\_value()} 方法，或者只是检查 \texttt{if (optional)}，因为 optional 可上下文转换为 \texttt{bool}。
+
+下面是一个例子：
+
+\begin{codebox}[cpp]
+// 通过 operator*
+std::optional<int> oint = 10;
+std::cout<< "oint " << *oint << '\n';
+// 通过 value()
+std::optional<std::string> ostr("hello");
+try
+{
+std::cout << "ostr " << ostr.value() << '\n';
+}
+catch (const std::bad_optional_access& e)
+{
+std::cout << e.what() << '\n';
+}
+// 通过 value_or()
+std::optional<double> odouble; // 空
+std::cout<< "odouble " << odouble.value_or(10.0) << '\n';
+\end{codebox}
+
+因此，最有用的方式大概就是先检查值是否存在，然后再访问它：
+
+\begin{codebox}[cpp]
+// 计算字符串的函数：
+std::optional<std::string> maybe_create_hello();
+// ……
+if (auto ostr = maybe_create_hello(); ostr)
+std::cout << "ostr " << *ostr << '\n';
+else
+std::cout << "ostr is null\n";
+\end{codebox}
+
+\section{std::optional 的操作}
+我们来看看该类型还有哪些其它操作可用。
+
+\subsection{修改值}
+如果你已经有一个 optional 对象，就可以通过 \texttt{emplace}、\texttt{reset}、\texttt{swap}、赋值等几种操作快速修改所包含的值。如果你用 \texttt{nullopt} 赋值（或 \texttt{reset}），那么若 optional 包含值，其析构函数将被调用。下面是一个简要总结：
+
+\begin{codebox}[cpp]
+// 章节 Optional/optional_reset.cpp
+#include <optional>
+#include <iostream>
+#include <string>
+class UserName
+{
+public:
+explicit UserName(std::string str) : mName(std::move(str))
+{
+std::cout << "UserName::UserName('" << mName << "')\n";
+}
+~UserName()
+{
+std::cout << "UserName::~UserName('" << mName << "')\n";
+}
+private:
+std::string mName;
+};
+int main()
+{
+std::optional<UserName> oEmpty;
+// emplace：
+oEmpty.emplace("Steve");
+// 调用 ~Steve 析构并创建新的 Mark：
+oEmpty.emplace("Mark");
+// reset 使其再次为空
+oEmpty.reset(); // 调用 ~Mark
+// 等同于：
+//oEmpty = std::nullopt;
+// 赋一个新值：
+oEmpty.emplace("Fred");
+oEmpty = UserName("Joe");
+}
+\end{codebox}
+
+\subsection{比较}
+\texttt{std::optional} 允许你以几乎“正常”的方式比较所包含的对象，但当操作数是 \texttt{nullopt} 时有几个例外。如下所示：
+
+\begin{codebox}[cpp]
+// 章节 Optional/optional_comparision.cpp
+#include <optional>
+#include <iostream>
+int main()
+{
+std::optional<int> oEmpty;
+std::optional<int> oTwo(2);
+std::optional<int> oTen(10);
+std::cout << std::boolalpha;
+std::cout << (oTen > oTwo) << '\n';
+std::cout << (oTen < oTwo) << '\n';
+std::cout << (oEmpty < oTwo) << '\n';
+std::cout << (oEmpty == std::nullopt) << '\n';
+std::cout << (oTen == 10) << '\n';
+}
+\end{codebox}
+
+上述代码会输出：
+
+\begin{codebox}[cpp]
+true
+// (oTen > oTwo)
+false // (oTen < oTwo)
+true
+// (oEmpty < oTwo)
+true
+// (oEmpty == std::nullopt)
+true
+// (oTen == 10)
+\end{codebox}
+
+当操作数包含（同类型的）值时，你会看到预期的结果。但当某个操作数是 \texttt{nullopt} 时，它永远“小于”任何含有值的 optional。
+
+\section{std::optional 的示例}
+下面是几个更完整的例子，\texttt{std::optional} 在其中非常适用。
+
+\subsection{带可选昵称与年龄的用户名}
+\begin{codebox}[cpp]
+// 章节 Optional/optional_user_name.cpp
+#include <optional>
+#include <iostream>
+using namespace std;
+class UserRecord
+{
+public:
+UserRecord (string name, optional<string> nick, optional<int> age)
+: mName{move(name)}, mNick{move(nick)}, mAge{age}
+{
+}
+friend ostream& operator << (ostream& stream, const UserRecord& user);
+private:
+string mName;
+optional<string> mNick;
+optional<int> mAge;
+};
+ostream& operator << (ostream& os, const UserRecord& user)
+{
+os << user.mName;
+if (user.mNick)
+os << ' ' << *user.mNick;
+if (user.mAge)
+os << ' ' << "age of " << *user.mAge;
+return os;
+}
+int main()
+{
+UserRecord tim { "Tim", "SuperTim", 16 };
+UserRecord nano { "Nathan", nullopt, nullopt };
+cout << tim << '\n';
+cout << nano << '\n';
+}
+\end{codebox}
+
+上面的例子展示了一个带有可选字段的简单类。名字是必填的，而其它属性：“昵称”与“年龄”是可选的。
+
+\subsection{从命令行解析整数}
+\begin{codebox}[cpp]
+// 章节 Optional/optional_parsing.cpp
+#include <optional>
+#include <iostream>
+#include <string>
+std::optional<int> ParseInt(const char* arg)
+{
+try
+{
+return { std::stoi(std::string(arg)) };
+}
+catch (...)
+{
+std::cerr << "cannot convert '" << arg << "' to int!\n";
+}
+return { };
+}
+int main(int argc, const char* argv[])
+{
+if (argc >= 3)
+{
+auto oFirst = ParseInt(argv[1]);
+auto oSecond = ParseInt(argv[2]);
+if (oFirst && oSecond)
+{
+std::cout << "sum of " << *oFirst << " and " << *oSecond;
+std::cout << " is " << *oFirst + *oSecond << '\n';
+}
+}
+}
+\end{codebox}
+
+上面的代码使用 optional 来表示我们是否执行了转换。注意，我们实际上把异常处理转换成了 optional，因此跳过了可能出现的错误。这种技术可能看起来有些“有争议”。该代码还使用了 \texttt{stoi}，它可能被新的 \texttt{from\_chars} 方法取代。
+
+\subsection{其它示例}
+下面是几个你可能用到 \texttt{std::optional} 的更多想法：
+\begin{itemize}
+\item 表示可选的配置值
+\item 几何与数学：判断对象之间是否存在交点
+\item \texttt{Find*()} 函数的返回值（前提是你不关心错误，比如连接断开、数据库错误之类）
+\end{itemize}
+
+你可能会在博文《A Wall of Your std::optional Examples》\footnote{\url{https://www.bfilipek.com/2018/06/optional-examples-wall.html}} 中找到其它有趣的用法。该博文包含了许多由读者提交的例子。
+
+\section{性能与内存考量}
+当你使用 \texttt{std::optional} 时，代价是更大的内存占用。从概念上讲，你所用标准库中的 optional 可能实现如下：
+
+\begin{codebox}[cpp]
+template <typename T>
+class optional
+{
+bool _initialized;
+std::aligned_storage_t<sizeof(t), alignof(T)> _storage;
+public:
+// operations
+};
+\end{codebox}
+
+简而言之，optional 包装了你的类型，为它准备好空间，然后加上一个布尔参数。这意味着它会根据对齐规则扩展你的类型的大小。
+
+对齐规则很重要，因为标准规定：类模板 optional [optional.optional]：所包含的值应分配在 optional 存储中适合类型 T 对齐的区域。
+
+例如：
+
+\begin{codebox}[cpp]
+// sizeof(double) = 8
+// sizeof(int) = 4
+std::optional<double> od; // sizeof = 16 字节
+std::optional<int> oi; // sizeof = 8 字节
+\end{codebox}
+
+虽然 \texttt{bool} 类型通常只占一个字节，但 optional 类型需要遵循对齐规则，因此整个包装器比 \texttt{sizeof(YourType) + 1} 字节要大。
+
+例如，如果你有一个如下类型：
+
+\begin{codebox}[cpp]
+struct Range
+{
+std::optional<double> mMin;
+std::optional<double> mMax;
+};
+\end{codebox}
+
+它会比使用你自定义的类型占用更多空间：
+
+\begin{codebox}[cpp]
+struct Range
+{
+bool mMinAvailable;
+bool mMaxAvailable;
+double mMin;
+double mMax;
+};
+\end{codebox}
+
+在第一种情况下，我们占用了 32 字节！第二种版本是 24 字节。完整代码见本章 \texttt{Optional/optional\_sizeof.cpp}。
+
+\section{从 boost::optional 迁移}
+\texttt{std::optional} 直接改编自 \texttt{boost::optional}，因此两个版本的使用体验应当一致。从其中一个迁移到另一个应当很容易，但当然，仍有一些细微差别。
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c}
+\toprule
+方面 & std::optional & boost::optional（1.67.0\footnotemark） \\
+\midrule
+移动语义 & yes & yes \\
+noexcept & yes & yes \\
+哈希支持 & yes & no \\
+抛出异常的取值访问器 & yes & yes \\
+字面量类型（可用于 constexpr 表达式） & yes & no \\
+原地构造 & \texttt{emplace}，标签 \texttt{in\_place} & emplace()，标签 in\_place\_init\_if\_t、in\_place\_init\_t、utility in\_place\_factory \\
+空状态标签 & nullopt & none \\
+可选引用 & no & yes \\
+从 optional<U> 转换为 optional<T> & yes & yes \\
+显式转换为指针（get\_ptr） & no & yes \\
+推导指引 & yes & no \\
+\bottomrule
+\end{tabularx}
+\end{table}
+\footnotetext{指 boost 1.67.0 版本，表中对比基于该版本。}
+
+\section{特殊情况：optional<bool> 与 optional<T\*>}
+虽然你可以将 optional 用于任何类型，但在尝试包装布尔值或指针时需要留意。
+
+\texttt{std::optional<bool> ob} —— 它建模了什么？通过这种构造，你得到了一个三态布尔。因此如果你需要它，或许更好的选择是寻找真正的“三态布尔”，比如 \texttt{boost::tribool}\footnote{\url{https://www.boost.org/doc/libs/1_67_0/doc/html/tribool.html}}。
+
+此外，使用这种类型可能令人困惑，因为如果内部有值，\texttt{ob} 会转换为 \texttt{bool}，而 \texttt{*ob} 会返回那个存储的值（如果可用）。
+
+同样地，对于指针你也有类似的歧义：
+
+\begin{codebox}[cpp]
+// 不要尝试以这种方式编写，这只是一个例子！
+std::optional<int*> opi { new int(10) };
+if (opi && *opi)
+{
+std::cout << **opi << std::endl;
+delete *opi;
+}
+if (opi)
+std::cout << "opi is still not empty!";
+\end{codebox}
+
+指向 \texttt{int} 的指针本身天然就是“可空”的，因此把它包进 optional 会让它非常难用。
+
+\section{小结}
+关于 \texttt{std::optional} 需要了解的几个核心要点：
+\begin{itemize}
+\item \texttt{std::optional} 是一种用于表示“可空”类型的包装类型
+\item \texttt{std::optional} 不会使用任何动态分配
+\item \texttt{std::optional} 包含一个值，或者为空
+\begin{itemize}
+\item 使用 \texttt{operator*}、\texttt{operator->}、\texttt{value()} 或 \texttt{value\_or()} 来访问底层值。
+\end{itemize}
+\item \texttt{std::optional} 会隐式转换为 \texttt{bool}，因此你可以方便地检查它是否包含值
+\end{itemize}
+
+\section{编译器支持}
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+std::optional & 7.1 & 4.0 & VS 2017 15.0 \\
+\bottomrule
+\end{tabularx}
+\end{table}

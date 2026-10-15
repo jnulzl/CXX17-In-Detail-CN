@@ -1,0 +1,1148 @@
+从早期版本开始，标准库就提供了操作文件的选项。通过流（例如 \texttt{fstream}）可以打开文件、读取数据、写入字节，并执行许多其他操作。然而此前一直缺失的是把文件系统作为一个整体来操作的能力。例如在 C++14 中，你必须借助一些第三方库才能遍历目录、拼接路径、删除目录或读取文件权限。而现在，随着 C++17 的到来，我们以 \texttt{std::filesystem} 组件的形式向前迈进了一大步！
+
+在本章中你将学到：
+
+\begin{itemize}
+\item \texttt{std::filesystem} 是如何进入标准的
+\item 基本的类型与操作有哪些
+\item 如何处理路径
+\item 如何处理 \texttt{std::filesystem} 中的错误
+\item 如何遍历一个目录
+\item 如何创建新的目录与文件
+\end{itemize}
+
+\section{文件系统概览}
+
+虽然标准库曾缺少一些重要特性，但你总是可以使用 Boost 及其数十个子库来完成工作。C++ 委员会认为 Boost 库极为重要，于是将其中一些系统合并进了标准。例如智能指针（尽管在 C++11 中借助移动语义得到了改进）、正则表达式、\texttt{std::optional}、\texttt{std::any} 等等。
+
+\texttt{std::filesystem} 也有着相似的故事。
+
+文件系统库直接以 Boost filesystem 为模型，后者自 2003 年（1.30 版本）起就已可用。在 C++ 实现中，委员会还把该组件扩展到了非 POSIX 系统。该库最早以 TS（技术规范，Technical Specification）的形式提供，在经过了长时间的改进与反馈之后，最终合并进了 C++17 标准。
+
+该库位于 \texttt{<filesystem>} 头文件，并使用 \texttt{std::filesystem} 命名空间。
+
+\subsection{库的核心组成}
+
+文件系统库是标准库中相当重要的一部分。它定义了许多带有数十个方法的类型，同时还提供了大量自由函数。
+
+下面我们可以定义该模块的核心元素：
+
+\begin{itemize}
+\item \texttt{std::filesystem::path} 对象允许你操纵那些代表系统中存在或不存在的文件与目录的路径。
+\item \texttt{std::filesystem::directory\_entry} 代表一个现有的路径，并带有额外的状态信息，例如最后写入时间、文件大小或其他属性。
+\item 目录迭代器允许你遍历给定的目录。该库提供了递归与非递归两个版本。
+\item 许多辅助函数，例如获取路径信息、文件操作、权限、创建目录等等。
+\end{itemize}
+
+在下一节中，你将看到组成 \texttt{std::filesystem} 的所有部分的演示。
+
+\section{演示}
+
+与其一开始就逐个细节地探究该库，不如在下一页先看一个演示示例：递归地显示给定目录中所有文件的基本信息。这能让你对该库的整体样貌有一个高层次的了解。
+
+\begin{codebox}[cpp]
+// Chapter Filesystem/filesystem_list_files.cpp
+#include <filesystem>
+#include <iomanip>
+#include <iostream>
+
+namespace fs = std::filesystem;
+
+void DisplayDirectoryTree(const fs::path& pathToScan, int level = 0) {
+    for (const auto& entry : fs::directory_iterator(pathToScan)) {
+        const auto filenameStr = entry.path().filename().string();
+        if (entry.is_directory()) {
+            std::cout << std::setw(level * 3) << "" << filenameStr << '\n';
+            DisplayDirectoryTree(entry, level + 1);
+        }
+        else if (entry.is_regular_file()) {
+            std::cout << std::setw(level * 3) << "" << filenameStr
+                      << ", size " << fs::file_size(entry) << " bytes\n";
+        }
+        else
+            std::cout << std::setw(level * 3) << "" << " [?]" << filenameStr << '\n';
+    }
+}
+
+int main(int argc, char* argv[]) {
+    try {
+        const fs::path pathToShow{ argc >= 2 ? argv[1] : fs::current_path() };
+        std::cout << "listing files in the directory: "
+                  << fs::absolute(pathToShow).string() << '\n';
+        DisplayDirectoryTree(pathToShow);
+    }
+    catch (const fs::filesystem_error& err) {
+        std::cerr << "filesystem error! " << err.what() << '\n';
+    }
+    catch (const std::exception& ex) {
+        std::cerr << "general exception: " << ex.what() << '\n';
+    }
+}
+\end{codebox}
+
+我们可以在临时路径 \texttt{D:\textbackslash testlist\textbackslash} 上运行这个程序，得到如下输出：
+
+\begin{codebox}[cpp]
+Running on Windows:
+.\ListFiles.exe D:\testlist\
+listing files in the directory: D:\testlist\
+abc.txt, size 357 bytes
+def.txt, size 430 bytes
+ghi.txt, size 190 bytes
+dirTemp
+  jkl.txt, size 162 bytes
+  mno.txt, size 1728 bytes
+tempDir
+  abc.txt, size 174 bytes
+  def.txt, size 163 bytes
+  tempInner
+    abc.txt, size 144 bytes
+    mno.txt, size 1728 bytes
+    xyz.txt, size 3168 bytes
+\end{codebox}
+
+应用程序会递归地列出文件，随着每一层缩进，你可以看到我们正在进入一个新的目录。
+
+在 Linux 上（WSL 中的 Ubuntu 18.04）运行：
+
+\begin{codebox}[cpp]
+Running on a Linux (Ubuntu 18.04 on WSL):
+fenbf@FEN-NODE:/mnt/f/wsl$ ./list_files.out testList/
+listing files in the directory: /mnt/f/wsl/testList/
+a.txt, size 965 bytes
+b.txt, size 1667 bytes
+c.txt, size 1394 bytes
+d.txt, size 1408 bytes
+directoryTemp
+  a.txt, size 1165 bytes
+  b.txt, size 1601 bytes
+tempDir
+  a.txt, size 1502 bytes
+  b.txt, size 1549 bytes
+  x.txt, size 1487 bytes
+\end{codebox}
+
+现在让我们来检视这个演示的核心元素。
+
+要使用这个库，我们必须包含相关的头文件。对于文件系统库，它是：
+
+\begin{codebox}[cpp]
+#include <filesystem>
+\end{codebox}
+
+所有的类型、函数与名字都位于 \texttt{std::filesystem} 命名空间中。为了方便，通常建立一个命名空间别名：
+
+\begin{codebox}[cpp]
+namespace fs = std::filesystem;
+\end{codebox}
+
+这样我们就可以用 \texttt{fs::path} 来引用名字，而不必写 \texttt{std::filesystem::path}。
+
+让我们从 \texttt{main()} 函数开始，那里是应用程序逻辑的起点。
+
+程序从命令行接收一个可选的参数。如果为空，我们就使用当前系统路径：
+
+\begin{codebox}[cpp]
+const fs::path pathToShow{ argc >= 2 ? argv[1] : fs::current_path() };
+\end{codebox}
+
+\texttt{pathToShow} 可以从字符串创建——优先使用 \texttt{argv[1]}，如果没有则 \texttt{current\_path()} 是一个返回当前系统路径的辅助自由函数。
+
+在接下来的两行（第 28 行和第 29 行）中，我们显示迭代的起始路径。\texttt{absolute()} 函数会“展开”输入路径，并在需要时把它从相对形式转换为绝对形式。
+
+应用程序的核心部分是 \texttt{DisplayDirectoryTree()} 函数。
+
+在函数内部，我们使用 \texttt{directory\_iterator} 来检查目录，找出其中的文件或更多的目录。
+
+\begin{codebox}[cpp]
+for (const auto& entry : fs::directory_iterator(pathToShow))
+\end{codebox}
+
+每一次循环迭代都会产生另一个 \texttt{directory\_entry}，我们需要对它进行判断。我们可以决定是否应该递归调用该函数（当 \texttt{entry.is\_directory()} 为真时），或者如果它是一个普通文件，就只显示一些基本信息。
+
+如你所见，我们可以访问 \texttt{path} 和 \texttt{directory entry} 的许多方法。例如，我们使用 \texttt{filename} 只返回路径中的文件名部分，从而可以显示“树”状结构。我们还调用 \texttt{fs::file\_size} 来查询文件的大小。
+
+在简短的演示之后，现在让我们更仔细地看看 \texttt{filesystem::path}、\texttt{filesystem::directory\_entry}、辅助的非成员函数以及错误处理。
+
+\section{路径对象}
+
+该库的核心部分是路径对象。它包含一个路径名（pathname）——一个构成路径名称的字符串。该对象并不一定要指向文件系统中真实存在的文件。路径甚至可以是非法形式。
+
+\myGraphic{0.9}{images/fig\_p201\_1.png}{路径的组成结构}
+
+路径由以下元素构成：\texttt{root-name root-directory relative-path}：
+
+\begin{itemize}
+\item （可选）\texttt{root-name}：POSIX 系统没有根名。在 Windows 上，它通常是某个驱动器的名称，例如 \texttt{"C:"}
+\item （可选）\texttt{root-directory}：区分相对路径与绝对路径
+\item \texttt{relative-path}：
+  \begin{itemize}
+  \item \texttt{filename}
+  \item \texttt{directory separator}
+  \item \texttt{relative-path}
+  \end{itemize}
+\end{itemize}
+
+我们可以用下面的示意图来说明它：
+
+路径结构
+
+该类实现了许多用于提取路径各部分的方法：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{>{\ttfamily\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+方法 & 说明 \\
+\midrule
+path::root\_name() & 返回路径的根名 \\
+path::root\_directory() & 返回路径的根目录 \\
+path::root\_path() & 返回路径的根路径 \\
+path::relative\_path() & 返回相对于根路径的路径 \\
+path::parent\_path() & 返回父路径的路径 \\
+path::filename() & 返回路径中的文件名部分 \\
+path::stem() & 返回路径中的主干（stem）部分 \\
+path::extension() & 返回路径中的文件扩展名部分 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+如果某个给定元素不存在，那么上述函数会返回一个空的路径。
+
+还有一些方法用于查询路径的元素：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{>{\ttfamily\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+查询名 & 说明 \\
+\midrule
+path::has\_root\_path() & 查询路径是否拥有根 \\
+path::has\_root\_name() & 查询路径是否拥有根名 \\
+path::has\_root\_directory() & 检查路径是否拥有根目录 \\
+path::has\_relative\_path() & 检查路径是否拥有相对路径部分 \\
+path::has\_parent\_path() & 检查路径是否拥有父路径 \\
+path::has\_filename() & 检查路径是否拥有文件名 \\
+path::has\_stem() & 检查路径是否拥有主干部分 \\
+path::has\_extension() & 检查路径是否拥有扩展名 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+我们可以使用上述所有方法，并编写一个示例来显示给定路径的信息：
+
+\begin{codebox}[cpp]
+// Chapter Filesystem/filesystem_path_info.cpp
+const filesystem::path testPath{...};
+if (testPath.has_root_name())
+    cout << "root_name() = " << testPath.root_name() << '\n';
+else
+    cout << "no root-name\n";
+if (testPath.has_root_directory())
+    cout << "root directory() = " << testPath.root_directory() << '\n';
+else
+    cout << "no root-directory\n";
+if (testPath.has_root_path())
+    cout << "root_path() = " << testPath.root_path() << '\n';
+else
+    cout << "no root-path\n";
+if (testPath.has_relative_path())
+    cout << "relative_path() = " << testPath.relative_path() << '\n';
+else
+    cout << "no relative-path\n";
+if (testPath.has_parent_path())
+    cout << "parent_path() = " << testPath.parent_path() << '\n';
+else
+    cout << "no parent-path\n";
+if (testPath.has_filename())
+    cout << "filename() = " << testPath.filename() << '\n';
+else
+    cout << "no filename\n";
+\end{codebox}
+
+对于文件路径（例如 \texttt{"C:\textbackslash Windows\textbackslash system.ini"}），输出如下：
+
+\begin{codebox}[cpp]
+root_name() = "C:"
+root directory() = "\\"
+root_path() = "C:\\"
+relative_path() = "Windows\\system.ini"
+parent_path() = "C:\\Windows"
+filename() = "system.ini"
+stem() = "system"
+extension() = ".ini"
+\end{codebox}
+
+类似地，在 POSIX 系统上，对于路径 \texttt{/usr/temp/abc.txt}：
+
+\begin{codebox}[cpp]
+no root-name
+root directory() = "/"
+root_path() = "/"
+relative_path() = "usr/temp/abc.txt"
+parent_path() = "/usr/temp"
+filename() = "abc.txt"
+stem() = "abc"
+extension() = ".txt"
+\end{codebox}
+
+还有一个小技巧可以让你遍历路径对象的各个部分。\texttt{std::filesystem::path} 为 \texttt{begin()} 和 \texttt{end()} 提供了重载，这正是你能在基于范围的 \texttt{for} 循环中使用它的原因：
+
+\begin{codebox}[cpp]
+int i = 0;
+for (const auto& part : testPath)
+    cout << "path part: " << i++ << " = " << part << '\n';
+\end{codebox}
+
+对于 \texttt{C:\textbackslash Windows\textbackslash system.ini} 的输出：
+
+\begin{codebox}[cpp]
+path part: 0 = C:
+path part: 1 = \
+path part: 2 = Windows
+path part: 3 = system.ini
+\end{codebox}
+
+\subsection{路径操作}
+
+下面是 \texttt{path} 类其他重要方法的表格：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{>{\ttfamily\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+操作 & 说明 \\
+\midrule
+path::append() & 用目录分隔符把一个路径追加到另一个路径之后 \\
+path::concat() & 不带目录分隔符地拼接路径 \\
+path::clear() & 清除所有元素，使其成为空路径 \\
+path::remove\_filename() & 从路径中移除文件名部分 \\
+path::replace\_filename() & 替换单个文件名部分 \\
+path::replace\_extension() & 替换扩展名 \\
+path::swap() & 交换两个路径 \\
+path::compare() & 比较路径与另一个路径的词法表示，返回一个整数 \\
+path::empty() & 检查路径是否为空 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\mySamllsectionNoContent{比较}
+
+\texttt{path} 类有几个重载的运算符：
+
+\texttt{==, !=, <, >, <=, =>}
+
+以及 \texttt{path::compare()} 方法，它返回一个整数值。
+
+所有方法都使用路径的原生格式，逐元素地进行比较。
+
+\begin{codebox}[cpp]
+fs::path p1 { "/usr/a/b/c" };
+fs::path p2 { "/usr/a/b/c" };
+assert(p1 == p2);
+assert(p1.compare(p2) == 0);
+p1 = "/usr/a/b/c";
+p2 = "/usr/a/b/c/d";
+assert(p1 < p2);
+assert(p1.compare(p2) < 0);
+\end{codebox}
+
+在 Windows 上，我们还可以测试路径中含有根元素的情况：
+
+\begin{codebox}[cpp]
+p1 = "C:/test";
+p2 = "abc/xyz"; // 没有根路径，因此它“小于”带有根的路径
+assert(p1 > p2);
+assert(p1.compare(p2) > 0);
+\end{codebox}
+
+或者，同样在 Windows 上，测试路径格式不同的情况：
+
+\begin{codebox}[cpp]
+fs::path p3 { "/usr/a/b/c" }; // 在 Windows 上会被转换为原生格式
+fs::path p4 { "\\usr/a\\b/c" };
+assert(p3 == p4);
+assert(p3.compare(p4) == 0);
+\end{codebox}
+
+你可以在 Chapter Filesystem/filesystem\_compare.cpp 中把玩这些代码。
+
+\mySamllsectionNoContent{路径拼接}
+
+我们有两个方法可以用来拼接路径：
+
+\begin{itemize}
+\item \texttt{path::append()}——用一个目录分隔符追加路径。
+\item \texttt{path::concat()}——只追加“字符串”，不带任何分隔符。
+\end{itemize}
+
+该功能也可以通过运算符 \texttt{/}、\texttt{/=}（追加）、\texttt{+} 和 \texttt{+=}（拼接）来实现。例如：
+
+\begin{codebox}[cpp]
+// append:
+fs::path p1{"C:\\temp"};
+p1 /= "user";
+p1 /= "data";
+cout << p1 << '\n';
+// concat:
+fs::path p2("C:\\temp\\");
+p2 += "user";
+p2 += "data";
+cout << p2 << '\n';
+\end{codebox}
+
+输出为：
+
+\begin{codebox}[cpp]
+C:\temp\user\data
+C:\temp\userdata
+\end{codebox}
+
+然而，追加路径有几条你必须留意的规则。例如，如果另一个路径是绝对路径，或者另一个路径带有根名，并且该根名与当前路径的根名不同，那么追加操作会替换掉当前路径。
+
+\begin{codebox}[cpp]
+auto resW = fs::path{"foo"} / "D:\";
+// Windows
+auto resP = fs::path{"foo"} / "/bar";
+// POSIX
+// resW 现在是 "D:\"
+// resP 现在是 "/bar"
+\end{codebox}
+
+在上述情况下，\texttt{resW} 和 \texttt{resP} 都会包含第二个操作数的值，因为 \texttt{D:\textbackslash} 和 \texttt{/bar} 都包含根元素。
+
+\mySamllsectionNoContent{流运算符}
+
+\texttt{path} 类也实现了 \texttt{>>} 和 \texttt{<<} 运算符。
+
+这些运算符使用 \texttt{std::quoted} 来保留正确的格式。这就是示例中的路径显示出来带有引号的原因。
+
+在 Windows 上，这还会使运行时为原生格式的路径输出 \texttt{"\textbackslash\textbackslash"}。
+
+例如在 POSIX 上：
+
+\begin{codebox}[cpp]
+fs::path p1 { "/usr/test/temp.xyz" };
+std::cout << p1;
+\end{codebox}
+
+代码会打印 \texttt{/usr/test/temp.xyz}。
+
+而在 Windows 上：
+
+\begin{codebox}[cpp]
+fs::path p1{ "usr/test/temp.xyz" };
+fs::path p2{ "usr\\test\\temp.xyz" };
+std::cout << p1 << '\n' << p2;
+\end{codebox}
+
+代码会输出：
+
+\begin{codebox}[cpp]
+"usr/test/temp.xyz"
+"usr\\test\\temp.xyz"
+\end{codebox}
+
+\subsection{路径格式与转换}
+
+文件系统库以 POSIX 为模型（例如所有基于 Unix 的系统都实现了 POSIX 标准），但也能与其他文件系统协同工作，例如 Windows。正因为如此，在以可移植的方式使用路径时有几点需要牢记。
+
+第一点是路径格式。我们有两种核心模式：
+
+\begin{itemize}
+\item \texttt{generic}——通用格式，即标准所指定的格式（基于 POSIX 格式）
+\item \texttt{native}——特定实现所使用的格式
+\end{itemize}
+
+在 POSIX 系统上，原生格式等同于通用格式。但在 Windows 上则不同。
+
+格式的主要区别在于，Windows 使用反斜杠（\texttt{\textbackslash}）而不是斜杠（\texttt{/}）。另一点是 Windows 拥有根目录——例如 \texttt{C:}、\texttt{D:} 或其他盘符。
+
+还有一点重要的是用于保存路径元素的字符串类型。在 POSIX 上是 \texttt{char}（以及 \texttt{std::string}），而在 Windows 上则是 \texttt{wchar\_t} 和 \texttt{std::wstring}。\texttt{path} 类型定义了 \texttt{path::value\_type} 和 \texttt{string\_type}（定义为 \texttt{std::basic\_string<value\_type>}）来暴露这些属性。
+
+\texttt{path} 类有几个方法，让你可以选用最匹配的格式。
+
+如果你想使用原生格式，可以使用：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{>{\ttfamily\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+操作 & 说明 \\
+\midrule
+path::c\_str() & 返回 \texttt{value\_type*} \\
+path::native() & 返回 \texttt{string\_type\&} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+还有许多方法会把原生格式进行转换：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{>{\ttfamily\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+操作 & 说明 \\
+\midrule
+path::string() & 转换为 \texttt{string} \\
+path::wstring() & 转换为 \texttt{wstring} \\
+path::u8string() & 转换为 \texttt{u8string} \\
+path::u16string() & 转换为 \texttt{u16string} \\
+path::u32string() & 转换为 \texttt{u32string} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+由于 Windows 使用 \texttt{wchar\_t} 作为路径的底层类型，因此你需要留意向 \texttt{char} 的“隐藏”转换。
+
+\section{目录项与目录遍历}
+
+虽然 \texttt{path} 类代表存在或不存在的文件或路径，但我们还有另一个更具体的对象：它就是 \texttt{directory\_entry} 对象。该对象指向真实存在的文件和目录，并且通常通过文件系统迭代器获得。
+
+此外，实现被鼓励去缓存额外的文件属性。这样一来就能减少系统调用的次数。
+
+\subsection{使用目录迭代器遍历路径}
+
+你可以使用两个可用的迭代器来遍历路径：
+
+\begin{itemize}
+\item \texttt{directory\_iterator}——在单个目录内迭代，输入迭代器。
+\item \texttt{recursive\_directory\_iterator}——递归迭代，输入迭代器。
+\end{itemize}
+
+在两种方式中，被访问文件名的顺序都是未指定的，每个目录项只会被访问一次。
+
+如果在目录迭代器创建之后，有文件或目录被删除或添加到目录树中，那么这种变化是否会透过迭代器被观察到是未指定的。
+
+在两种迭代器中，目录 \texttt{.} 和 \texttt{..} 都会被跳过。
+
+你可以使用下面的模式来遍历一个目录：
+
+\begin{codebox}[cpp]
+for (auto const & entry : fs::directory_iterator(pathToShow))
+{
+    ...
+}
+\end{codebox}
+
+或者使用另一种方式，借助算法，你还可以在此基础上过滤路径：
+
+\begin{codebox}[cpp]
+std::filesystem::recursive_directory_iterator dirpos{ inPath };
+std::copy_if(begin(dirpos), end(dirpos), std::back_inserter(paths),
+    some_predicate);
+\end{codebox}
+
+\texttt{some\_predicate} 是一个谓词，根据某个给定的 \texttt{directory\_entry} 对象是否匹配我们的过滤器，返回 \texttt{true} 或 \texttt{false}。
+
+\subsection{directory\_entry 的方法}
+
+下面是 \texttt{directory\_entry} 方法的列表：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{>{\ttfamily\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+操作 & 说明 \\
+\midrule
+directory\_entry::assign() & 替换项内的路径，并调用 \texttt{refresh()} 以更新缓存的属性 \\
+directory\_entry::replace\_filename() & 替换项内的文件名，并调用 \texttt{refresh()} 以更新缓存的属性 \\
+directory\_entry::refresh() & 更新文件的缓存属性 \\
+directory\_entry::exists() & 检查目录项是否指向真实存在的文件系统对象 \\
+directory\_entry::is\_block\_file() & 如果文件项是块设备文件则返回 \texttt{true} \\
+directory\_entry::is\_character\_file() & 如果文件项是字符设备文件则返回 \texttt{true} \\
+directory\_entry::is\_directory() & 如果文件项是目录则返回 \texttt{true} \\
+directory\_entry::is\_fifo() & 如果文件项指向一个命名管道则返回 \texttt{true} \\
+directory\_entry::is\_other() & 如果文件项指向其他文件类型则返回 \texttt{true} \\
+directory\_entry::is\_regular\_file() & 如果文件项是普通文件则返回 \texttt{true} \\
+directory\_entry::is\_socket() & 如果文件项是一个命名 IPC 套接字则返回 \texttt{true} \\
+directory\_entry::is\_symlink() & 如果文件项是一个符号链接则返回 \texttt{true} \\
+directory\_entry::file\_size() & 返回该目录项所指向文件的大小 \\
+directory\_entry::hard\_link\_count() & 返回指向该文件的硬链接数量 \\
+directory\_entry::last\_write\_time() & 获取或设置文件的最后写入时间 \\
+directory\_entry::status() & 返回该目录项所指定文件的状态 \\
+directory\_entry::symlink\_status() & 返回该目录项所指定文件的符号链接状态 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\section{辅助函数}
+
+到目前为止，我们已经介绍了文件系统的三个元素：\texttt{path} 类、\texttt{directory\_entry} 和目录迭代器。该库还提供了一组非成员函数。
+
+\mySamllsectionNoContent{查询函数}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{>{\ttfamily\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+函数 & 说明 \\
+\midrule
+filesystem::is\_block\_file() & 检查给定路径是否指向块设备 \\
+filesystem::is\_character\_file() & 检查给定路径是否指向字符设备 \\
+filesystem::is\_directory() & 检查给定路径是否指向目录 \\
+filesystem::is\_empty() & 检查给定路径是否指向空文件或空目录 \\
+filesystem::is\_fifo() & 检查给定路径是否指向命名管道 \\
+filesystem::is\_other() & 检查参数是否指向另一个文件 \\
+filesystem::is\_regular\_file() & 检查参数是否指向普通文件 \\
+filesystem::is\_socket() & 检查参数是否指向命名 IPC 套接字 \\
+filesystem::is\_symlink() & 检查参数是否指向符号链接 \\
+filesystem::status\_known() & 检查文件状态是否已知 \\
+filesystem::exists() & 检查路径是否指向真实存在的文件系统对象 \\
+filesystem::file\_size() & 返回文件的大小 \\
+filesystem::last\_write\_time() & 获取或设置最后一次数据修改的时间 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\mySamllsectionNoContent{与路径相关}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{>{\ttfamily\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+函数名 & 说明 \\
+\midrule
+filesystem::absolute() & 组合出一个绝对路径 \\
+filesystem::canonical() & 组合出一个规范路径 \\
+filesystem::weakly\_canonical() & 组合出一个弱规范路径 \\
+filesystem::relative() & 组合出一个相对路径 \\
+filesystem::proximate() & 组合出一个邻近路径 \\
+filesystem::current\_path() & 返回或设置当前工作目录 \\
+filesystem::equivalent() & 检查两个路径是否指向同一个文件系统对象 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\mySamllsectionNoContent{目录与文件管理}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{>{\ttfamily\raggedright\arraybackslash}X >{\raggedright\arraybackslash}X}
+\toprule
+函数名 & 说明 \\
+\midrule
+filesystem::copy() & 复制文件或目录 \\
+filesystem::copy\_file() & 复制文件内容 \\
+filesystem::copy\_symlink() & 复制一个符号链接 \\
+filesystem::create\_directory(), filesystem::create\_directories() & 创建新目录 \\
+filesystem::create\_hard\_link() & 创建硬链接 \\
+filesystem::create\_symlink(), filesystem::create\_directory\_symlink() & 创建符号链接 \\
+filesystem::hard\_link\_count() & 返回指向特定文件的硬链接数量 \\
+filesystem::permissions() & 修改文件访问权限 \\
+filesystem::read\_symlink() & 获取符号链接的目标 \\
+filesystem::remove(), filesystem::remove\_all() & 删除单个文件，或递归删除整个目录及其全部内容 \\
+filesystem::rename() & 移动或重命名文件或目录 \\
+filesystem::resize\_file() & 通过截断或填零来改变普通文件的大小 \\
+filesystem::space() & 确定文件系统上可用的空闲空间 \\
+filesystem::status(), filesystem::symlink\_status() & 确定文件属性、确定文件属性、检查符号链接目标 \\
+filesystem::temp\_directory\_path() & 返回一个适合作为临时文件的目录 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\subsection{获取与显示文件时间}
+
+在 C++17 中，关于 \texttt{last\_write\_time()} 的值有一点不太方便。
+
+我们有一个自由函数，以及 \texttt{directory\_entry} 中的一个方法。它们都返回 \texttt{file\_time\_type}，目前它被定义为：
+
+\begin{codebox}[cpp]
+using file_time_type = std::chrono::time_point</*trivial-clock*/>;
+\end{codebox}
+
+来自标准 30.10.25 头文件 \texttt{<filesystem>} 的概要：
+
+\texttt{trivial-clock} 是一个由实现定义的类型，它满足 TrivialClock 要求，并且有能力表示并测量文件时间值。实现应当确保文件时间类型的分辨率与范围，能够反映操作系统相关的文件时间值的分辨率与范围。
+
+换句话说，这取决于具体的实现。
+
+例如在 GCC/Clang 的 STL 中，文件时间是基于 \texttt{chrono::system\_clock} 实现的，而在 MSVC 中它则是一个平台相关的时钟。
+
+关于 Visual Studio 中的实现决策，这里有更多细节：\texttt{std::filesystem::file\_time\_type} 不允许轻松转换为 \texttt{time\_t}\footnote{\url{https://developercommunity.visualstudio.com/content/problem/251213/stdfilesystemfile-time-type-does-not-allow-easy-co.html}}。
+
+这种情况可能很快就会改善，因为在 C++20 中我们将获得 \texttt{std::chrono::file\_clock} 以及时钟之间的转换例程。参见 P0355\footnote{\url{https://wg21.link/p0355}}（已加入 C++20）。
+
+让我们看一些代码。
+
+\begin{codebox}[cpp]
+auto filetime = fs::last_write_time(myPath);
+const auto toNow = fs::file_time_type::clock::now() - filetime;
+const auto elapsedSec = duration_cast<seconds>(toNow).count();
+// skipped std::chrono prefix for duration_cast and seconds
+\end{codebox}
+
+上面的代码给出了一种计算自上次更新以来所经过秒数的方法。不过，这不如显示一个真实日期来得有用。
+
+在 POSIX 上（GCC 和 Clang 的实现）你可以轻松地把文件时间转换为 \texttt{system\_clock}，然后再获取 \texttt{std::time\_t}：
+
+\begin{codebox}[cpp]
+auto filetime = fs::last_write_time(myPath);
+std::time_t convfiletime = std::chrono::system_clock::to_time_t(filetime);
+std::cout << "Updated: " << std::ctime(&convfiletime) << '\n';
+\end{codebox}
+
+在 MSVC 中这段代码无法编译。不过有一个保证：\texttt{file\_time\_type} 可以与接收 \texttt{FILETIME} 的原生操作系统函数一起使用。因此我们可以编写如下代码来解决这个问题：
+
+\begin{codebox}[cpp]
+auto filetime = fs::last_write_time(myPath);
+FILETIME ft;
+memcpy(&ft, &filetime, sizeof(FILETIME));
+SYSTEMTIME
+stSystemTime;
+if (FileTimeToSystemTime(&ft, &stSystemTime)) {
+    // use stSystemTime.wYear, stSystemTime.wMonth, stSystemTime.wDay, ...
+}
+\end{codebox}
+
+请参阅 Chapter Filesystem/filesystem\_list\_files\_info.cpp 查看示例。
+
+\subsection{文件权限}
+
+在上面的表格中你可能已经注意到与文件权限相关的函数。我们有两个主要的函数：
+
+\begin{itemize}
+\item \texttt{std::filesystem::status()} 和
+\item \texttt{std::filesystem::permissions()}
+\end{itemize}
+
+第一个函数返回 \texttt{file\_status}，其中包含关于文件类型以及其权限的信息。
+
+你可以使用第二个函数来修改文件权限。例如，把一个文件改成只读。
+
+文件权限——\texttt{std::filesystem::perms}——它是一个枚举类，表示如下的取值：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{>{\ttfamily\raggedright\arraybackslash}X c >{\ttfamily}c >{\raggedright\arraybackslash}X}
+\toprule
+名称 & 值（八进制） & POSIX 宏 & 说明 \\
+\midrule
+none & & & 没有为文件设置任何权限 \\
+owner\_read & 0400 & S\_IRUSR & 所有者读权限 \\
+owner\_write & 0200 & S\_IWUSR & 所有者写权限 \\
+owner\_exec & 0100 & S\_IXUSR & 所有者执行/搜索权限 \\
+owner\_all & 0700 & S\_IRWXU & 所有者的读、写、执行/搜索权限 \\
+group\_read & 0040 & S\_IRGRP & 组读权限 \\
+group\_write & 0020 & S\_IWGRP & 组写权限 \\
+group\_exec & 0010 & S\_IXGRP & 组执行/搜索权限 \\
+group\_all & 0070 & S\_IRWXG & 组的读、写、执行/搜索权限 \\
+others\_read & 0004 & S\_IROTH & 其他用户读权限 \\
+others\_write & 0002 & S\_IWOTH & 其他用户写权限 \\
+others\_exec & 0001 & S\_IXOTH & 其他用户执行/搜索权限 \\
+others\_all & 0007 & S\_IRWXO & 其他用户的读、写、执行/搜索权限 \\
+all & 0777 & owner\_all | group\_all | others\_all & 所有用户的读、写、执行/搜索权限 \\
+set\_uid & 04000 & S\_ISUID & 执行时设置用户 ID \\
+set\_gid & 02000 & S\_ISGID & 执行时设置组 ID \\
+sticky\_bit & 01000 & S\_ISVTX & 取决于操作系统 \\
+mask & 07777 & all | set\_uid | set\_gid | sticky\_bit & \\
+unknown & 0xFFFF & & 权限未知 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+下面是一个简短的代码示例，演示如何打印文件权限：
+
+\begin{codebox}[cpp]
+// Chapter Filesystem/filesystem_permissions.cpp
+std::ostream& operator<< (std::ostream& stream, fs::perms p)
+{
+    stream << "owner: "
+           << ((p & fs::perms::owner_read)
+               != fs::perms::none ? "r" : "-")
+           << ((p & fs::perms::owner_write) != fs::perms::none ? "w" : "-")
+           << ((p & fs::perms::owner_exec)
+               != fs::perms::none ? "x" : "-");
+    stream << " group: "
+           << ((p & fs::perms::group_read)
+               != fs::perms::none ? "r" : "-")
+           << ((p & fs::perms::group_write) != fs::perms::none ? "w" : "-")
+           << ((p & fs::perms::group_exec)
+               != fs::perms::none ? "x" : "-");
+    stream << " others: "
+           << ((p & fs::perms::others_read)
+               != fs::perms::none ? "r" : "-")
+           << ((p & fs::perms::others_write) != fs::perms::none ? "w" : "-")
+           << ((p & fs::perms::others_exec)
+               != fs::perms::none ? "x" : "-");
+    return stream;
+}
+\end{codebox}
+
+你可以像下面这样使用上面的 \texttt{operator<<} 实现：
+
+\begin{codebox}[cpp]
+std::cout << "perms: " << fs::status("myFile.txt").permissions() << '\n';
+\end{codebox}
+
+\mySamllsectionNoContent{设置权限}
+
+要修改权限，可以使用如下代码：
+
+\begin{codebox}[cpp]
+std::cout << "after creation: " << fs::status(sTempName).permissions() << '\n';
+fs::permissions(sTempName, fs::perms::owner_read, fs::perm_options::remove);
+std::cout << "after change: " << fs::status(sTempName).permissions() << '\n';
+\end{codebox}
+
+\texttt{std::filesystem::permissions} 是一个函数，它接收一个路径，然后一个标志以及“动作”参数。
+
+\texttt{fs::perm\_options} 有三种模式：
+
+\begin{itemize}
+\item \texttt{replace}——你传入的权限标志会替换现有状态。这是该参数的默认值。
+\item \texttt{add}——权限标志会与现有状态做按位或（OR）操作。
+\item \texttt{remove}——权限会被替换为“取反后的参数与当前权限的按位与（AND）”。
+\item \texttt{nofollow}——权限会在符号链接本身上修改，而不是它所解析到的文件上。
+\end{itemize}
+
+例如：
+
+\begin{codebox}[cpp]
+// remove "owner_read"
+fs::permissions(myPath, fs::perms::owner_read, fs::perm_options::remove);
+// add "owner_read"
+fs::permissions(myPath, fs::perms::owner_read, fs::perm_options::add);
+// replace and set "owner_all":
+fs::permissions(myPath, fs::perms::owner_all); // replace is default param
+\end{codebox}
+
+\mySamllsectionNoContent{Windows 注意事项}
+
+Windows 不是一个 POSIX 系统，它不会把 POSIX 文件权限映射到自己的体系上。对于 \texttt{std::filesystem}，它只支持两种模式：只读和全部。
+
+来自微软文档（Microsoft Docs）的文件系统文档\footnote{\url{https://docs.microsoft.com/en-us/cpp/standard-library/filesystem-enumerations?view=vs-2017}}：
+
+受支持的取值本质上是“只读”（readonly）和全部（all）。对于一个只读文件，所有的 \texttt{*\_write} 位都不会被设置。否则就会设置全部位（0777）。
+
+因此，遗憾的是，如果你想在 Windows 上修改文件权限，你的选择非常有限。
+
+\section{错误处理与文件竞态}
+
+到目前为止，本章的示例都使用异常处理来报告错误。文件系统 API 还配备了会输出错误码的函数与方法重载。你可以自行决定是要异常还是要错误码。
+
+例如我们为 \texttt{file\_size} 提供了两个重载：
+
+\begin{codebox}[cpp]
+uintmax_t file_size(const path& p);
+uintmax_t file_size(const path& p, error_code& ec) noexcept;
+\end{codebox}
+
+第二个重载可以这样使用：
+
+\begin{codebox}[cpp]
+const std::filesystem::path testPath("C:\test.txt");
+std::error_code ec{};
+auto size = std::filesystem::file_size(testPath, ec);
+if (ec == std::error_code{})
+    std::cout << "size: " << size << '\n';
+else
+    std::cout << "error when accessing test file, size is: "
+              << size << " message: " << ec.message() << '\n';
+\end{codebox}
+
+\texttt{file\_size} 接收一个额外的输出参数——\texttt{error\_code}，并在发生状况时设置一个值。如果操作成功，\texttt{ec} 会被值初始化。
+
+\subsection{文件竞态}
+
+需要重点指出的是，当发生文件竞态时，可能会出现未定义行为。
+
+来自 30.10.2.3 文件系统竞态行为：
+
+\begin{myQuote}
+如果对本库函数的调用引入了文件系统竞态，则行为未定义。
+\end{myQuote}
+
+以及来自 30.10.9 文件系统竞态：
+
+\begin{myQuote}
+当多个线程、进程或计算机在文件系统中交错地访问并修改同一个对象时，所出现的情况。
+\end{myQuote}
+
+\section{示例}
+
+在本节中，我们将分析几个使用 \texttt{std::filesystem} 的示例。我们会从一个简单的情形入手——把文件加载到字符串中，然后探究如何创建目录，再使用 \texttt{std::regex} 来过滤文件名。
+
+演示样例位于 Chapter Filesystem/filesystem\_list\_files.cpp，而它的扩展版本（会显示文件时间与大小）位于 Chapter Filesystem/filesystem\_list\_files\_info.cpp。
+
+要了解更多用例，你还可以阅读《如何并行化 CSV 读取器》一章，其中 \texttt{std::filesystem} 是查找 CSV 文件的关键元素。
+
+\subsection{将文件加载到字符串中}
+
+第一个示例展示了一个很有说服力的情形：我们利用 \texttt{std::filesystem} 与大小相关的函数，为文件内容构建一个缓冲区。
+
+代码如下：
+
+\begin{codebox}[cpp]
+// Chapter Filesystem/filesystem_load_string.cpp
+[[nodiscard]] std::string GetFileContents(const fs::path& filePath)
+{
+    std::ifstream inFile{ filePath, std::ios::in | std::ios::binary };
+    if (!inFile)
+        throw std::runtime_error("Cannot open " + filePath.string());
+    const auto fsize = fs::file_size(filePath);
+    if (fsize > std::numeric_limits<size_t>::max())
+        throw std::runtime_error("file is too large to fit into size_t! "
+                                 + filePath.string());
+    std::string str(static_cast<size_t>(fsize), 0);
+    inFile.read(str.data(), str.size());
+    if (!inFile)
+        throw std::runtime_error("Could not read the full contents from "
+                                 + filePath.string());
+    return str;
+}
+\end{codebox}
+
+在 C++17 之前，要获取文件大小，你通常会把文件指针重新定位到末尾，然后再读取一次位置。例如：
+
+\begin{codebox}[cpp]
+ifstream testFile("test.file", ios::binary);
+const
+auto begin = myfile.tellg();
+testFile.seekg (0, ios::end);
+const auto end = testFile.tellg();
+const auto fsize =
+(end-begin);
+\end{codebox}
+
+你也可以带上 \texttt{ios::ate} 标志打开文件，这样文件指针会自动定位到末尾。
+
+然而，上述所有方法都需要打开一个文件，而使用 \texttt{std::filesystem} 代码则要短得多，并且我们只需要读取文件属性。
+
+更重要的是，\texttt{std::filesystem} 技术所需的访问权限“更低”，因为你只需要父目录的读权限，而不需要“文件读”权限。
+
+如果你使用 \texttt{std::filesystem::directory\_entry} 的方法，那么文件大小有可能来自缓存。
+
+\subsection{创建目录}
+
+在第二个示例中，我们将构建 N 个目录，每个目录中包含 M 个文件。
+
+\texttt{main()} 的核心部分：
+
+\begin{codebox}[cpp]
+// Chapter Filesystem/filesystem_build_temp.cpp
+const fs::path startingPath{ argc >= 2 ? argv[1] : fs::current_path() };
+const std::string strTempName{ argc >= 3 ? argv[2] : "temp" };
+const int numDirectories{ argc >= 4 ? std::stoi(argv[3]) : 4 };
+const int numFiles{ argc >= 5 ? std::stoi(argv[4]) : 4 };
+if (numDirectories < 0 || numFiles < 0)
+    throw std::runtime_error("negative input numbers...");
+const fs::path tempPath = startingPath / strTempName;
+CreateTempData(tempPath, numDirectories, numFiles);
+\end{codebox}
+
+以及 \texttt{CreateTempData()} 函数：
+
+\begin{codebox}[cpp]
+// Chapter Filesystem/filesystem_build_temp.cpp
+std::vector<fs::path> GeneratePathNames(const fs::path& tempPath,
+                                        unsigned num)
+{
+    std::vector<fs::path> outPaths{ num, tempPath };
+    for (auto& dirName : outPaths)
+    {
+        // use pointer value to generate unique name...
+        const auto addr = reinterpret_cast<uintptr_t>(&dirName);
+        dirName /= std::string("tt") + std::to_string(addr);
+    }
+    return outPaths;
+}
+
+void CreateTempFiles(const fs::path& dir, unsigned numFiles)
+{
+    auto files = GeneratePathNames(dir, numFiles);
+    for (auto &oneFile : files)
+    {
+        std::ofstream entry(oneFile.replace_extension(".txt"));
+        entry << "Hello World";
+    }
+}
+
+void CreateTempData(const fs::path& tempPath, unsigned numDirectories,
+                    unsigned numFiles)
+{
+    fs::create_directory(tempPath);
+    auto dirPaths = GeneratePathNames(tempPath, numDirectories);
+    for (auto& dir : dirPaths)
+    {
+        if (fs::create_directory(dir))
+            CreateTempFiles(dir, numFiles);
+    }
+}
+\end{codebox}
+
+在 \texttt{CreateTempData()} 中，我们首先创建文件夹结构的根。然后在 \texttt{GeneratePathNames()} 中生成路径名。每个路径名都由指针地址构成。这种方式应该能给我们提供足够唯一的名字。当我们拥有了一个唯一路径的向量之后，我们再生成另一个用于文件的路径向量。在这种情况下，我们使用 \texttt{.txt} 扩展名。使用 \texttt{fs::create\_directory} 创建目录，而创建文件则可以使用标准的流对象。
+
+如果我们用如下参数运行应用程序：“. temp 2 4”，它会创建如下的目录结构：
+
+\begin{codebox}[cpp]
+temp
+  tt22325368
+    tt22283456.txt, size 11 bytes
+    tt22283484.txt, size 11 bytes
+    tt22283512.txt, size 11 bytes
+    tt22283540.txt, size 11 bytes
+  tt22325396
+    tt22283456.txt, size 11 bytes
+    tt22283484.txt, size 11 bytes
+    tt22283512.txt, size 11 bytes
+    tt22283540.txt, size 11 bytes
+\end{codebox}
+
+\subsection{使用正则表达式过滤文件}
+
+本章的最后一个示例将借助 \texttt{std::regex}（自 C++11 起可用）来过滤文件名。
+
+\texttt{main()} 的核心部分：
+
+\begin{codebox}[cpp]
+// Chapter Filesystem/filesystem_filter_files.cpp
+const fs::path pathToShow{ argc >= 2 ? argv[1] : fs::current_path() };
+const std::regex reg(argc >= 3 ? argv[2] : "");
+auto files = CollectFiles(pathToShow);
+std::sort(files.begin(), files.end());
+for (auto& entry : files)
+{
+    const auto strFileName = entry.mPath.filename().string();
+    if (std::regex_match(strFileName, reg))
+        std::cout << strFileName << "\tsize: " << entry.mSize << '\n';
+}
+\end{codebox}
+
+应用程序会收集给定目录（递归地）中的所有文件。随后，如果某个文件项与正则匹配，就显示出来。
+
+\texttt{CollectFiles()} 函数使用递归目录迭代器来查找所有文件，并为每个文件构建基本信息。在 \texttt{main()} 中我们按大小对每个文件排序。
+
+\begin{codebox}[cpp]
+// Chapter Filesystem/filesystem_filter_files.cpp
+struct FileEntry
+{
+    fs::path mPath;
+    uintmax_t mSize{ 0 };
+    static FileEntry Create(const fs::path& filePath) {
+        return FileEntry{ filePath, fs::file_size(filePath) };
+    }
+    friend bool operator < (const FileEntry& a, const FileEntry& b) noexcept {
+        return a.mSize < b.mSize;
+    }
+};
+
+std::vector<FileEntry> CollectFiles(const fs::path& inPath)
+{
+    std::vector<fs::path> paths;
+    if (fs::exists(inPath) && fs::is_directory(inPath))
+    {
+        std::filesystem::recursive_directory_iterator dirpos{ inPath };
+        std::copy_if(begin(dirpos), end(dirpos), std::back_inserter(paths),
+            [](const fs::directory_entry& entry) {
+                return entry.is_regular_file();
+            }
+        );
+    }
+    std::vector<FileEntry> files(paths.size());
+    std::transform(paths.cbegin(), paths.cend(), files.begin(), FileEntry::Create);
+    return files;
+}
+\end{codebox}
+
+在 \texttt{CollectFiles} 中，我们使用一个递归迭代器，然后借助 \texttt{std::copy\_if} 只过滤出普通文件。之后，一旦文件被收集完毕，我们就创建 \texttt{FileEntry} 对象的输出向量。\texttt{FileEntry::Create()} 会初始化对象，并同时获取文件的大小。
+
+例如，如果我们用如下参数运行应用程序“temp .*.txt”，我们就会查找目录中所有的 txt 文件。
+
+\begin{codebox}[cpp]
+.\FilterFiles.exe temp .*.txt
+tt22283456.txt
+  size: 11
+tt22283484.txt
+  size: 11
+tt22283512.txt
+  size: 11
+tt22283540.txt
+  size: 11
+tt22283456.txt
+  size: 11
+tt22283484.txt
+  size: 11
+tt22283512.txt
+  size: 11
+tt22283540.txt
+  size: 11
+\end{codebox}
+
+\mySamllsectionNoContent{优化与代码清理}
+
+\texttt{CollectFiles()} 函数会遍历一个目录，然后把普通文件的路径输出到一个向量中。之后该函数创建 \texttt{FileEntry} 对象，并将其返回到一个独立的向量中。
+
+问题在于，我们没有充分利用扫描期间所拥有的 \texttt{filesystem::directory\_entry} 对象的全部可能。例如，\texttt{filesystem::directory\_entry::file\_size} 方法会比 \texttt{filesystem::file\_size} 快得多，因为 \texttt{directory\_entry} 通常会把文件属性保留在缓存中。
+
+另一个可以优化的点是那个临时的路径向量。我们可以通过基于范围的 \texttt{for} 循环来跳过它。
+
+下面是最终的代码：
+
+\begin{codebox}[cpp]
+// Chapter Filesystem/filesystem_filter_files.cpp
+std::vector<FileEntry> CollectFilesOpt(const fs::path& inPath)
+{
+    std::vector<FileEntry> files;
+    if (fs::exists(inPath) && fs::is_directory(inPath))
+    {
+        for (const auto& entry : fs::recursive_directory_iterator{ inPath })
+        {
+            if (entry.is_regular_file())
+                files.push_back({ entry, entry.file_size() });
+        }
+    }
+    return files;
+}
+\end{codebox}
+
+\section{本章小结}
+
+在本章中，我们深入探究了 C++17 最大的新增特性之一：\texttt{std::filesystem}。你看到了该库的核心元素：\texttt{path} 类、\texttt{directory\_entry} 和迭代器，以及大量辅助自由函数。
+
+贯穿全章，我们还探究了许多示例：从简单的情形（如拼接路径、获取文件大小、遍历目录）到更加复杂的情形（如使用正则过滤，或创建临时目录结构）。
+
+你现在应该已经具备了关于 \texttt{std::filesystem} 的扎实知识，并准备好自己去探索这个库了。
+
+\texttt{std::filesystem} 的完整实现在论文 P0218：为 C++17 采纳文件系统 TS\footnote{\url{https://wg21.link/p0218}} 中描述。还有其他一些更新，例如 P0317：目录项缓存\footnote{\url{https://wg21.link/p0317}}，P0430——在非 POSIX 类操作系统上的文件系统库\footnote{\url{https://wg21.link/p0430}}，P0492R2——C++17 国家机构意见的解决方案\footnote{\url{https://wg21.link/p0492}}，P0392——通过文件系统路径适配 string\_view\footnote{\url{https://wg21.link/p0392r0}}。你可以在 C++17 草案 N4687\footnote{\url{https://wg21.link/n4687}} 的“filesystem”一节（30.10）中找到最终规范，或者在这个在线地址 timsong-cpp/filesystems\footnote{\url{https://timsong-cpp.github.io/cppwp/n4659/filesystems}} 下找到。
+
+\section{编译器支持}
+
+\paragraph{GCC/libstdc++}
+
+该库在 8.0 版本中加入——参见这个提交——实现 C++17 文件系统库\footnote{\url{https://github.com/gcc-mirror/gcc/commit/3b90ed62fb848046ed7ddef07df7c806e7f3fadb}}。不过，从 GCC 5.3 起你就可以把玩实验性版本——即 TS 实现。
+
+在这两种情况（完整支持或实验性）下，你都必须链接 \texttt{-lstdc++fs}，因为该库位于主标准库模块之外。
+
+例如要编译示例代码——Chapter Filesystem/filesystem\_list\_files.cpp——你应该编写如下命令：
+
+\begin{codebox}[text]
+g++ -std=c++17 -O2 -Wall -Werror -pedantic filesystem_list_files.cpp -lstdc++fs
+\end{codebox}
+
+\paragraph{Clang/libc++}
+
+对 \texttt{<filesystem>} 的支持最近在 7.0 版本中实现，你可以看到这个提交——实现 filesystem\footnote{\url{https://github.com/llvm-mirror/libcxx/commit/a0866c5fb5020d15c69deda94d32a7f982b88dc9}}。
+
+从 Clang 3.9 起你就可以开始把玩实验性版本，即 TS 实现。
+
+与 GCC 类似，你必须链接 \texttt{libc++fs.a}。
+
+\paragraph{Visual Studio}
+
+\texttt{<filesystem>} 的完整实现在 Visual Studio 2017 15.7 中加入。
+
+在 15.7 之前，你可以在更早的版本中使用 \texttt{<experimental/filesystem>}。实验性实现甚至在 Visual Studio 2012 中就已可用，并在之后的每个版本中逐步改进。
+
+\subsection{编译器支持汇总}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+Filesystem & 8.0 & 7.0 & VS 2017 15.7 \\
+\bottomrule
+\end{tabularx}
+\end{table}

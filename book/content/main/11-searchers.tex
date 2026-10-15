@@ -1,0 +1,352 @@
+C++14 中的 \texttt{std::search} 提供了一种在给定区间中搜索某个模式（pattern）的通用方式。该算法不仅可用于字符容器，也可用于存放自定义类型的容器。遗憾的是，这种技术一度颇为受限——其性能通常较慢，因为它使用的是朴素匹配算法，复杂度等于模式长度乘以文本长度。而在 C++17 中，我们获得了新的 \texttt{std::search} 重载，它们开放了诸如 Boyer–Moore 系列等全新且强大的算法，这些算法在平均情况下具有线性复杂度。
+
+本章你将学到：
+
+\begin{itemize}
+\item 如何借助对模式进行预处理来击败朴素搜索算法。
+\item 如何使用 \texttt{std::search} 在区间中高效地搜索某个模式。
+\item 如何将 \texttt{std::search} 用于自定义类型。
+\end{itemize}
+
+\section{字符串匹配算法概览}
+
+字符串匹配（string-matching）指的是在一段文本中找出某个字符串（称为“模式”，pattern）的一次或全部出现位置。这些字符串建立在有限字符集之上，该字符集被称为“字母表”（alphabet）。
+
+解决这个问题存在大量算法，下面是维基百科\footnote{\url{https://en.wikipedia.org/wiki/String-searching_algorithm\#Single-pattern_algorithms}} 给出的一份简表：
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c X c}
+\toprule
+算法 & 预处理 & 匹配 & 空间 \\
+\midrule
+朴素字符串搜索 & 无 & $O(nm)$ & 无 \\
+Rabin–Karp & $O(m)$ & 平均 $O(n+m)$，最差 $O((n-m)m)$ & $O(1)$ \\
+Knuth–Morris–Pratt & $O(m)$ & $O(n)$ & $O(m)$ \\
+Boyer–Moore & $O(m+k)$ & 最佳 $O(n/m)$，最差 $O(mn)$ & $O(k)$ \\
+Boyer–Moore-Horspool & $O(m+k)$ & 最佳 $O(n/m)$，最差 $O(mn)$ & $O(k)$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+其中 $m$ 为模式的长度，$n$ 为文本的长度，$k$ 为字母表的大小。
+
+朴素算法尝试在文本的每一个位置都去匹配模式：
+
+\begin{codebox}[cpp]
+Pattern = Hello
+Text = SuperHelloWorld
+SuperHelloWorld
+1. Hello <- XX
+2.
+Hello <- XX
+3.
+Hello <- XX
+4.
+Hello <- XX
+5.
+Hello <- XX
+6.
+Hello <- OK!
+\end{codebox}
+
+在上面的例子中，我们试图在“SuperHelloWorld”中找出“Hello”。可以看到，朴素版本会逐个位置尝试，直到第 6 次迭代才找到“Hello”。
+
+朴素方式与其他算法的主要区别在于：更快的算法利用了关于输入模式的额外知识，从而可以跳过大量徒劳的比较。为了获得这些知识，它们通常会在预处理阶段为模式建立一些查找表。查找表的大小往往与模式长度及字母表大小相关。
+
+在上述情形中，我们可以跳过大部分迭代，因为当我们在第一个位置尝试匹配 Hello 时，最后一个字母 o 与 r 存在差异。事实上，由于 r 在我们的模式中根本不出现，我们实际上可以一次性前进 5 步。
+
+\begin{codebox}[cpp]
+Pattern = Hello
+Text = SuperAwesomeHelloWorld
+SuperAwesomeHelloWorld
+1. Hello <- XX,
+2.
+Hello <- OK
+\end{codebox}
+
+我们仅用 2 次迭代就匹配成功了！该例子中所用的规则源自 Boyer–Moore 算法——它被称为“坏字符规则”（The Bad Character Rule）。
+
+在 C++ 中，字符串匹配通过 \texttt{std::search} 实现，它会在另一个区间中找到一段区间（即模式）：
+
+\begin{codebox}[cpp]
+template< class ForwardIt1, class ForwardIt2 >
+ForwardIt1 search( ForwardIt1 first, ForwardIt1 last,
+ForwardIt2 s_first, ForwardIt2 s_last );
+\end{codebox}
+
+C++17 之前，你无法控制 \texttt{std::search} 内部的算法选择。\texttt{std::search} 的复杂度被规定为 $O(mn)$——因此它通常就是朴素做法。而如今在 C++17 中，你有了更多选择。
+
+准确地说，还存在一个 \texttt{string::find}，它只针对字符序列工作。该方法可能有不同的实现，你无法控制其内部使用的算法。在示例一节中，你将看到一些性能实验，它们也把 \texttt{std::search} 的新算法与 \texttt{string::find} 做了对比。
+
+\section{C++17 中可用的新算法}
+
+C++17 从两方面更新了 \texttt{std::search} 算法：
+
+\begin{itemize}
+\item 现在可以使用执行策略（execution policy），以并行方式运行该算法的默认版本。
+\item 你可以提供一个负责执行搜索的搜索器（Searcher）对象。
+\end{itemize}
+
+C++17 提供了三种搜索器：
+
+\begin{itemize}
+\item \texttt{default\_searcher}——与 C++17 之前的版本相同，通常即朴素做法。工作于前向迭代器（Forward Iterators）之上。
+\item \texttt{boyer\_moore\_searcher}——使用 Boyer–Moore 算法的完整版本，包含两条规则：坏字符规则（bad character rule）与好后缀规则（good suffix rule）。工作于随机访问迭代器（Random Access Iterators）之上。
+\item \texttt{boyer\_moore\_horspool\_searcher}——Boyer–Moore 的简化版本，仅使用坏字符规则，但仍具有不错的平均复杂度。工作于随机访问迭代器（Random Access Iterators）之上。
+\end{itemize}
+
+\texttt{std::search} 配合搜索器使用时，不能与执行策略一同使用。
+
+\subsection{使用搜索器}
+
+\texttt{std::search} 函数为搜索器提供了如下重载：
+
+\begin{codebox}[cpp]
+template<class ForwardIterator, class Searcher>
+ForwardIterator search(ForwardIterator first, ForwardIterator last,
+const Searcher& searcher );
+\end{codebox}
+
+例如：
+
+\begin{codebox}[cpp]
+string testString = "Hello Super World";
+string needle = "Super";
+const auto it = search(begin(testString), end(testString),
+boyer_moore_searcher(begin(needle), end(needle));
+if (it == cend(testString))
+cout << "The string " << needle << " not found\n";
+\end{codebox}
+
+每个搜索器都通过构造函数初始化自身状态。构造函数需要保存模式区间，并执行预处理阶段。随后 \texttt{std::search} 调用它们的 \texttt{operator()}(\textit{iter} TextFirst, \textit{iter} TextLast) 方法，在文本区间中执行搜索。
+
+由于搜索器是一个对象，你可以在应用程序中传递它。若你想在多个不同的文本对象中搜索同一个模式，这会很有用——这种情况下预处理阶段只会执行一次。
+
+\section{示例}
+
+\subsection{性能实验}
+
+本示例构建了一个性能测试，用于试验在较大文本中查找模式的几种方式。测试的工作方式如下：
+
+\begin{itemize}
+\item 应用程序载入一个文本文件（可通过命令行参数配置），例如一本书的样例（如一个 500KB 的文本文件）。
+\item 整个文件内容被存入一个字符串——它将成为我们执行查找的“文本”（text）。
+\item 选定一个模式——从输入文本中取出 N 个字母。这样可以保证该模式一定能被找到。该字符串的位置可以位于开头、中间或末尾。
+\item 基准测试使用若干种算法，每种搜索都运行 \texttt{ITER} 次。
+\end{itemize}
+
+你可以在以下位置找到该示例：
+
+\texttt{Chapter Searchers/searchers\_benchmark.cpp}
+
+示例基准测试：
+
+\texttt{std::string::find} 版本：
+
+\begin{codebox}[cpp]
+RunAndMeasure("string::find", [&]() {
+for (size_t i = 0; i < ITERS; ++i)
+{
+std::size_t found = testString.find(needle);
+if (found == std::string::npos)
+std::cout << "The string " << needle << " not found\n";
+}
+});
+\end{codebox}
+
+\texttt{boyer\_moore\_horspool} 版本：
+
+\begin{codebox}[cpp]
+RunAndMeasure("boyer_moore_horspool_searcher", [&]() {
+for (size_t i = 0; i < ITERS; ++i)
+{
+auto it = std::search(testString.begin(), testString.end(),
+std::boyer_moore_horspool_searcher(
+needle.begin(), needle.end()));
+if (it == testString.end())
+std::cout << "The string " << needle << " not found\n";
+}
+});
+\end{codebox}
+
+\texttt{RunAndMeasure} 是一个接受可调用对象（例如 lambda）并执行的函数。它会测量该执行的耗时并打印结果。
+
+由于输入字符串是从文件载入的，编译器无法欺骗我们，也不会将这段代码优化掉。
+
+以下是在 Windows 10 64 位、i7 8700（基础频率 3.20 GHz）、6 核 / 12 线程的机器上运行该应用程序得到的部分结果（不过应用程序本身运行在单个线程上）。
+
+字符串大小为 547412 字节（来自一个 500KB 的文本文件），基准测试运行了 1000 次。
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+算法 & GCC 8.2 & Clang 7.0 & Visual Studio (Release x64) \\
+\midrule
+\texttt{string::find} & 579.48 & 367.90 & 380.78 \\
+\texttt{default\_searcher} & 391.99 & 552.02 & 604.33 \\
+\texttt{boyer\_moore\_searcher} & 37.89 (init 3.98) & 32.73 (init 3.02) & 34.71 (init 3.52) \\
+\texttt{boyer\_moore\_horspool\_searcher} & 30.943 (init 0) & 28.72 (init 0.5) & 31.70 (init 0.69) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\myGraphic{0.9}{images/fig\_p191\_1.png}{在 500KB 文本文件中部搜索 1000 个字母的模式}
+
+当从输入字符串的中间查找 1000 个字母时，两种新算法都比 \texttt{default\_searcher} 和 \texttt{string::find} 更快。\texttt{boyer\_moore} 在初始化上耗费的时间多于 \texttt{boyer\_moore\_horspool}（前者建立两张查找表而非一张，因此会占用更多空间与预处理开销）。结果还显示，\texttt{boyer\_moore} 对输入模式的预处理通常比 \texttt{boyer\_moore\_horspool} 更耗时。此外，在我们的测试中第二种算法也更快。但总而言之，新算法的速度甚至可达默认版本的 10…15 倍。
+
+以下是另一次运行的结果：这次我们使用相同的输入字符串（来自一个 500KB 的文本文件），进行 1000 次迭代，但模式只有 48 个字母。它是位于文件末尾的一句话（仅出现一次）。
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+算法 & GCC 8.2 & Clang 7.0 & Visual Studio (Release x64) \\
+\midrule
+\texttt{string::find} & 164.58 & 39.63 & 40.28 \\
+\texttt{default\_searcher} & 102.75 & 332.98 & 396.11 \\
+\texttt{boyer\_moore\_searcher} & 115.69 (init 0.96) & 95.56 (init 0.45) & 101.73 (init 0.49) \\
+\texttt{boyer\_moore\_horspool\_searcher} & 100.74 (init 0) & 97.48 (init 0.21) & 105.44 (init 0.23) \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+在本次测试中，Visual Studio 与 Clang 上的 Boyer–Moore 算法比 \texttt{string::find} 慢 2.5 倍。不过在 GCC 上 \texttt{string::find} 表现更差，而 \texttt{boyer\_moore\_horspool} 是最快的。
+
+\myGraphic{0.9}{images/fig\_p192\_1.png}{在 500KB 文本文件末尾搜索 48 个字母的文本}
+
+你可以自行运行这些实验，看看你所用 STL 实现的性能表现。基准测试有多种配置方式，既可以测试文本的不同位置（开头、中间、末尾），也可以检查某些字符串模式。
+
+\subsection{DNA 匹配}
+
+为了展示 \texttt{std::search} 的应用范围，我们来看一个简单的 DNA 匹配示例。该示例匹配的是自定义类型，而非普通的字符。
+
+例如，我们想在某个 DNA 序列中搜索 GCTGC 是否出现在序列 CTGATGTTAAGTCAACGCTGC 中。
+
+该应用程序为核苷酸（Nucleotides）使用了一个简单的数据结构：
+
+\begin{codebox}[cpp]
+struct Nucleotide
+{
+enum class Type : uint8_t {
+A = 0,
+C = 1,
+G = 3,
+T = 2
+};
+Type mType;
+friend bool operator==(Nucleotide a, Nucleotide b) noexcept
+{
+return a.mType == b.mType;
+}
+static char ToChar(Nucleotide t);
+static Nucleotide FromChar(char ch);
+};
+\end{codebox}
+
+配合以下两个转换静态方法：
+
+\begin{codebox}[cpp]
+char Nucleotide::ToChar(Nucleotide t)
+{
+switch (t.mType)
+{
+case Nucleotide::Type::A: return 'A';
+case Nucleotide::Type::C: return 'C';
+case Nucleotide::Type::G: return 'G';
+case Nucleotide::Type::T: return 'T';
+}
+return 0;
+}
+Nucleotide Nucleotide::FromChar(char ch)
+{
+return Nucleotide { static_cast<Nucleotide::Type>((ch >> 1) & 0x03) };
+}
+\end{codebox}
+
+以及作用于整个字符串的两个函数：
+
+\begin{codebox}[cpp]
+std::vector<Nucleotide> FromString(const std::string& s)
+{
+std::vector<Nucleotide> out;
+out.reserve(s.length());
+std::transform(std::cbegin(s), std::cend(s),
+std::back_inserter(out), Nucleotide::FromChar);
+return out;
+}
+std::string ToString(const std::vector<Nucleotide>& vec)
+{
+std::stringstream ss;
+std::ostream_iterator<char> out_it(ss);
+std::transform(std::cbegin(vec), std::cend(vec), out_it, Nucleotide::ToChar);
+return ss.str();
+}
+\end{codebox}
+
+该示例使用了 \texttt{boyer\_moore\_horspool\_searcher}，它需要哈希支持。因此我们必须如下定义它：
+
+\begin{codebox}[cpp]
+namespace std
+{
+template<> struct hash<Nucleotide>
+{
+size_t operator()(Nucleotide n) const noexcept
+{
+return std::hash<Nucleotide::Type>{}(n.mType);
+}
+};
+}
+\end{codebox}
+
+\texttt{std::hash} 本身就支持枚举类型，所以我们只需从整个类“重定向”到它即可。
+
+然后是测试代码：
+
+\begin{codebox}[cpp]
+const std::vector<Nucleotide> dna = FromString("CTGATGTTAAGTCAACGCTGC");
+std::cout << ToString(dna) << '\n';
+const std::vector<Nucleotide> s = FromString("GCTGC");
+std::cout << ToString(s) << '\n';
+std::boyer_moore_horspool_searcher searcher(std::cbegin(s), std::cend(s));
+const auto it = std::search(std::cbegin(dna), std::cend(dna), searcher);
+if (it == std::cend(dna))
+std::cout << "The pattern " << ToString(s) << " not found\n";
+else
+{
+std::cout << "DNA matched at position: "
+<< std::distance(std::cbegin(dna), it) << '\n';
+}
+\end{codebox}
+
+你可以在以下位置找到完整的源代码：
+
+\texttt{Chapter Searchers/dna\_demo.cpp}
+
+如你所见，该示例构建了一个存放自定义类型——核苷酸——的向量。为了让搜索器满意，自定义类型需要支持 \texttt{std::hash} 接口，并定义 \texttt{operator==}。
+
+\texttt{Nucleotide} 类型稍微浪费了一些空间——我们用整整一个字节仅仅存储四种选项 C、T、G、A。我们本可以只使用 2 个比特，但那样实现会更复杂。另一种选择是用三个核苷酸组成的三联体——密码子（Codon）来表示。每个密码子可用 6 个比特表示，这样就能更充分地利用整个字节。
+
+\section{本章小结}
+
+本章你了解了可以传入 \texttt{std::search} 算法的各类搜索器。它们让你可以使用更先进的字符串匹配算法——Boyer–Moore 与 Boyer–Moore–Horspool，其复杂度优于朴素做法。
+
+配合搜索器的 \texttt{std::search} 是一种通用算法，适用于大多数提供随机访问迭代器的容器。如果你处理的是字符串与字符，那么也可以把它与 \texttt{std::string::find} 做对比，后者通常会针对字符处理进行专门优化（具体取决于实现！）。
+
+\begin{myInfoBox}
+该变更由 N3905\footnote{\url{https://wg21.link/n3905}} 提案提出。
+\end{myInfoBox}
+
+\section{编译器支持}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\textwidth}{X c c c}
+\toprule
+特性 & GCC & Clang & MSVC \\
+\midrule
+Searchers & 7.1 & 3.9 & VS 2017 15.3 \\
+\bottomrule
+\end{tabularx}
+\end{table}
